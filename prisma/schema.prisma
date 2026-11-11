@@ -1,0 +1,412 @@
+// Localent.ai — production data target (PostgreSQL on Supabase).
+// The running demo uses the typed in-memory adapter in lib/ with identical shapes;
+// swap the adapter implementation for PrismaClient when DATABASE_URL is provisioned.
+// Money is ALWAYS integer cents. Rates are basis points (bps), snapshotted per bid.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+enum Role {
+  CUSTOMER
+  PRO
+  ADMIN
+}
+
+enum JobStatus {
+  OPEN
+  ACCEPTED
+  SCHEDULED
+  IN_PROGRESS
+  COMPLETED
+  DISPUTED
+  CANCELLED
+}
+
+enum BidStatus {
+  PENDING
+  ACCEPTED
+  REJECTED
+  EXPIRED
+}
+
+enum MilestoneStatus {
+  UNFUNDED
+  HELD
+  RELEASED
+  REFUNDED
+}
+
+enum VerificationTier {
+  NONE
+  BASIC_ID
+  VERIFIED_PRO
+}
+
+enum AppointmentStatus {
+  PROPOSED
+  CONFIRMED
+  RESCHEDULED
+  DONE
+  NO_SHOW
+}
+
+enum ChangeOrderStatus {
+  PROPOSED
+  APPROVED
+  REJECTED
+}
+
+enum EvidenceKind {
+  BEFORE_PHOTO
+  AFTER_PHOTO
+  CHECKIN
+}
+
+enum PaymentStatus {
+  REQUIRES_PAYMENT
+  HELD
+  RELEASED
+  REFUNDED
+  FAILED
+}
+
+enum DisputeStatus {
+  OPEN
+  RESOLVED_RELEASE
+  RESOLVED_REFUND
+}
+
+enum ReportStatus {
+  OPEN
+  REVIEWED
+  DISMISSED
+}
+
+model User {
+  id            String   @id @default(uuid()) @db.Uuid
+  email         String   @unique @db.Citext
+  passwordHash  String   @map("password_hash")
+  role          Role
+  name          String
+  phoneNumber   String?  @map("phone_number")
+  phoneVerified Boolean  @default(false) @map("phone_verified")
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  companyProfile   CompanyProfile?
+  jobsAsCustomer   JobPost[]        @relation("CustomerJobs")
+  bidsAsPro        Bid[]            @relation("ProBids")
+  sentMessages     ChatMessage[]    @relation("MessageSender")
+  reviewsGiven     Review[]         @relation("ReviewCustomer")
+  reviewsReceived  Review[]         @relation("ReviewPro")
+  payoutAccount    ProPayoutAccount?
+  availability     ProAvailability[]
+  appointments     Appointment[]    @relation("ProAppointments")
+  notifications    Notification[]
+  refreshTokens    RefreshToken[]
+  reportsFiled     Report[]         @relation("ReportReporter")
+  evidenceUploaded JobEvidence[]
+
+  @@map("users")
+}
+
+model CompanyProfile {
+  id                   String           @id @default(uuid()) @db.Uuid
+  userId               String           @unique @map("user_id") @db.Uuid
+  user                 User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  businessName         String           @map("business_name")
+  slug                 String           @unique
+  skillsArray          String[]         @map("skills_array")
+  bio                  String?
+  portfolioUrls        String[]         @map("portfolio_urls")
+  isVerified           Boolean          @default(false) @map("is_verified") // derived: tier = VERIFIED_PRO
+  verificationTier     VerificationTier @default(NONE) @map("verification_tier")
+  backgroundCheckStatus String?         @map("background_check_status")
+  licenceNumber        String?          @map("licence_number")
+  licenceTrade         String?          @map("licence_trade")
+  licenceState         String?          @map("licence_state")
+  serviceRadiusMiles   Int              @default(25) @map("service_radius_miles")
+  locationLat          Decimal          @map("location_lat") @db.Decimal(10, 7)
+  locationLng          Decimal          @map("location_lng") @db.Decimal(10, 7)
+  locationLabel        String           @map("location_label")
+  responseTimeHours    Int              @default(4) @map("response_time_hours")
+  yearsInBusiness      Int              @default(1) @map("years_in_business")
+  createdAt            DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([skillsArray], type: Gin)
+  @@map("company_profiles")
+}
+
+model JobPost {
+  id               String    @id @default(uuid()) @db.Uuid
+  customerId       String    @map("customer_id") @db.Uuid
+  customer         User      @relation("CustomerJobs", fields: [customerId], references: [id])
+  title            String
+  category         String
+  description      String
+  budgetMinCents   Int       @map("budget_min_cents")
+  budgetMaxCents   Int       @map("budget_max_cents")
+  locationLat      Decimal   @map("location_lat") @db.Decimal(10, 7) // rounded public coords (~0.5 mi)
+  locationLng      Decimal   @map("location_lng") @db.Decimal(10, 7)
+  locationLabel    String    @map("location_label")
+  status           JobStatus @default(OPEN)
+  preferredDate    DateTime? @map("preferred_date") @db.Date
+  matchedProLimit  Int       @default(5) @map("matched_pro_limit")
+  completionCodeHash String? @map("completion_code_hash")
+  completionRequestedAt DateTime? @map("completion_requested_at") @db.Timestamptz(6)
+  createdAt        DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  privateDetails JobPrivateDetails?
+  bids           Bid[]
+  messages       ChatMessage[]
+  reviews        Review[]
+  appointment    Appointment?
+  milestones     PaymentMilestone[]
+  changeOrders   ChangeOrder[]
+  evidence       JobEvidence[]
+  payments       Payment[]
+  disputes       Dispute[]
+
+  @@index([status, category])
+  @@map("job_posts")
+}
+
+// Exact address lives ONLY here. Never selected until milestone 1 is HELD
+// and the caller is the accepted pro (blueprint 4.3).
+model JobPrivateDetails {
+  jobId        String  @id @map("job_id") @db.Uuid
+  job          JobPost @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  streetAddress String @map("street_address")
+  unit         String?
+  zip          String
+  accessNotes  String? @map("access_notes")
+
+  @@map("job_private_details")
+}
+
+model Appointment {
+  id          String            @id @default(uuid()) @db.Uuid
+  jobId       String            @unique @map("job_id") @db.Uuid
+  job         JobPost           @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  proId       String            @map("pro_id") @db.Uuid
+  pro         User              @relation("ProAppointments", fields: [proId], references: [id])
+  scheduledDate DateTime        @map("scheduled_date") @db.Date
+  windowStart String            @map("window_start")
+  windowEnd   String            @map("window_end")
+  status      AppointmentStatus @default(PROPOSED)
+  createdAt   DateTime          @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@map("appointments")
+}
+
+model ProAvailability {
+  id        String @id @default(uuid()) @db.Uuid
+  proId     String @map("pro_id") @db.Uuid
+  pro       User   @relation(fields: [proId], references: [id], onDelete: Cascade)
+  weekday   Int    @db.SmallInt // 0=Sunday .. 6=Saturday
+  startTime String @map("start_time")
+  endTime   String @map("end_time")
+
+  @@unique([proId, weekday])
+  @@map("pro_availability")
+}
+
+model Bid {
+  id                      String    @id @default(uuid()) @db.Uuid
+  jobId                   String    @map("job_id") @db.Uuid
+  job                     JobPost   @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  proId                   String    @map("pro_id") @db.Uuid
+  pro                     User      @relation("ProBids", fields: [proId], references: [id])
+  totalAmountCents        Int       @map("total_amount_cents")
+  proCommissionRateBps    Int       @map("pro_commission_rate_bps")
+  proCommissionCents      Int       @map("pro_commission_cents")
+  customerFeeRateBps      Int       @map("customer_fee_rate_bps")
+  customerFeeCents        Int       @map("customer_fee_cents")
+  netPayoutCents          Int       @map("net_payout_cents") // total - pro commission, computed server-side
+  proposalText            String    @map("proposal_text")
+  status                  BidStatus @default(PENDING)
+  expiresAt               DateTime  @map("expires_at") @db.Timestamptz(6)
+  createdAt               DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  milestones PaymentMilestone[]
+
+  @@unique([jobId, proId])
+  @@map("bids")
+  // NOTE: production migration also adds a partial unique index:
+  // CREATE UNIQUE INDEX one_accepted_bid_per_job ON bids(job_id) WHERE status='ACCEPTED';
+}
+
+model ChatMessage {
+  id         String   @id @default(uuid()) @db.Uuid
+  jobId      String   @map("job_id") @db.Uuid
+  job        JobPost  @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  senderId   String   @map("sender_id") @db.Uuid
+  sender     User     @relation("MessageSender", fields: [senderId], references: [id])
+  messageText String  @map("message_text")
+  flagged    Boolean  @default(false) // contained phone/email pattern pre-funding (masked at write time)
+  timestamp  DateTime @default(now()) @db.Timestamptz(6)
+
+  @@index([jobId, timestamp])
+  @@map("chat_messages")
+}
+
+model Review {
+  id         String   @id @default(uuid()) @db.Uuid
+  jobId      String   @unique @map("job_id") @db.Uuid
+  job        JobPost  @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  customerId String   @map("customer_id") @db.Uuid
+  customer   User     @relation("ReviewCustomer", fields: [customerId], references: [id])
+  proId      String   @map("pro_id") @db.Uuid
+  pro        User     @relation("ReviewPro", fields: [proId], references: [id])
+  ratingValue Int     @map("rating_value") @db.SmallInt // CHECK 1..5 in migration
+  reviewText String   @map("review_text")
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@map("reviews")
+}
+
+model PaymentMilestone {
+  id              String          @id @default(uuid()) @db.Uuid
+  jobId           String          @map("job_id") @db.Uuid
+  job             JobPost         @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  bidId           String          @map("bid_id") @db.Uuid
+  bid             Bid             @relation(fields: [bidId], references: [id])
+  seq             Int             @db.SmallInt
+  label           String
+  amountCents     Int             @map("amount_cents")
+  status          MilestoneStatus @default(UNFUNDED)
+  paymentIntentId String?         @map("payment_intent_id")
+  transferId      String?         @map("transfer_id")
+  createdAt       DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@unique([jobId, seq])
+  @@map("payment_milestones")
+}
+
+model ChangeOrder {
+  id              String            @id @default(uuid()) @db.Uuid
+  jobId           String            @map("job_id") @db.Uuid
+  job             JobPost           @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  proId           String            @map("pro_id") @db.Uuid
+  description     String
+  deltaAmountCents Int              @map("delta_amount_cents")
+  status          ChangeOrderStatus @default(PROPOSED)
+  approvedAt      DateTime?         @map("approved_at") @db.Timestamptz(6)
+  createdAt       DateTime          @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@map("change_orders")
+}
+
+model JobEvidence {
+  id         String       @id @default(uuid()) @db.Uuid
+  jobId      String       @map("job_id") @db.Uuid
+  job        JobPost      @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  uploadedBy String       @map("uploaded_by") @db.Uuid
+  uploader   User         @relation(fields: [uploadedBy], references: [id])
+  kind       EvidenceKind
+  storageKey String       @map("storage_key")
+  createdAt  DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@map("job_evidence")
+}
+
+model Payment {
+  id              String        @id @default(uuid()) @db.Uuid
+  jobId           String        @map("job_id") @db.Uuid
+  job             JobPost       @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  milestoneId     String?       @map("milestone_id") @db.Uuid
+  paymentIntentId String        @unique @map("payment_intent_id")
+  transferId      String?       @map("transfer_id")
+  grossCents      Int           @map("gross_cents")
+  customerFeeCents Int          @default(0) @map("customer_fee_cents")
+  commissionCents Int           @default(0) @map("commission_cents")
+  netCents        Int           @map("net_cents")
+  status          PaymentStatus @default(REQUIRES_PAYMENT)
+  createdAt       DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@map("payments")
+}
+
+model ProPayoutAccount {
+  id               String   @id @default(uuid()) @db.Uuid
+  userId           String   @unique @map("user_id") @db.Uuid
+  user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  stripeAccountId  String   @map("stripe_account_id")
+  onboardingStatus String   @map("onboarding_status") // NOT_STARTED | PENDING | COMPLETE
+  kycStatus        String   @map("kyc_status")
+  payoutsEnabled   Boolean  @default(false) @map("payouts_enabled")
+  createdAt        DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@map("pro_payout_accounts")
+}
+
+model Dispute {
+  id         String        @id @default(uuid()) @db.Uuid
+  jobId      String        @map("job_id") @db.Uuid
+  job        JobPost       @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  openedBy   String        @map("opened_by") @db.Uuid
+  reason     String
+  status     DisputeStatus @default(OPEN)
+  resolution String?
+  createdAt  DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+  resolvedAt DateTime?     @map("resolved_at") @db.Timestamptz(6)
+
+  @@map("disputes")
+}
+
+model Report {
+  id         String       @id @default(uuid()) @db.Uuid
+  reporterId String       @map("reporter_id") @db.Uuid
+  reporter   User         @relation("ReportReporter", fields: [reporterId], references: [id])
+  targetType String       @map("target_type") // USER | JOB | MESSAGE
+  targetId   String       @map("target_id")
+  reason     String
+  status     ReportStatus @default(OPEN)
+  createdAt  DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@map("reports")
+}
+
+model Notification {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  kind      String   // NEW_LEAD | NEW_BID | MESSAGE | APPOINTMENT | PAYOUT | SYSTEM
+  text      String
+  jobId     String?  @map("job_id") @db.Uuid
+  read      Boolean  @default(false)
+  smsSent   Boolean  @default(false) @map("sms_sent") // Twilio adapter flips this when live
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@map("notifications")
+}
+
+model RefreshToken {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String   @map("token_hash")
+  expiresAt DateTime @map("expires_at") @db.Timestamptz(6)
+  revokedAt DateTime? @map("revoked_at") @db.Timestamptz(6)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@map("refresh_tokens")
+}
+
+model AdminAuditLog {
+  id        String   @id @default(uuid()) @db.Uuid
+  adminId   String   @map("admin_id") @db.Uuid
+  action    String   // VERIFY_PRO | REJECT_VERIFICATION | RESOLVE_DISPUTE_RELEASE | RESOLVE_DISPUTE_REFUND | ...
+  targetType String  @map("target_type")
+  targetId  String   @map("target_id")
+  detail    String?
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@map("admin_audit_log")
+}
