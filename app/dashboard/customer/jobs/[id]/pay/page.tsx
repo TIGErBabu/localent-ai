@@ -7,7 +7,7 @@ import { config } from "@/lib/config";
 import { CustomerNav } from "@/components/DashNav";
 import { fundMilestoneAction } from "@/app/actions";
 
-export default async function CustomerPayPage({ params, searchParams }: { params: Promise<{ id: string }>; searchParams: Promise<{ next?: string }> }) {
+export default async function CustomerPayPage({ params, searchParams }: { params: Promise<{ id: string }>; searchParams: Promise<{ next?: string; error?: string }> }) {
   const user = await requireRole("CUSTOMER");
   const { id } = await params;
   const sp = await searchParams;
@@ -22,6 +22,8 @@ export default async function CustomerPayPage({ params, searchParams }: { params
       <h1 className="mt-2 text-2xl font-extrabold text-slate-900">Fund escrow — {job.title}</h1>
       <p className="mt-1 text-sm text-slate-500">Your payment is held by Localent (via Stripe) and only released to {bid ? proName(bid.proId) : "your pro"} when the work is confirmed complete. Funding the deposit unlocks your exact address for your pro.</p>
       {sp.next === "complete" && <p className="mt-3 rounded-xl bg-amber-50 px-4 py-3 text-sm font-medium text-amber-800">Fund the balance milestone first — then you can confirm completion and release it.</p>}
+      {sp.error === "payment" && <p className="mt-3 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm font-medium text-red-800">Your payment could not be completed, so this milestone was <strong>not funded</strong> and no money is being held. Please try again.</p>}
+      {sp.error === "livecard" && <p className="mt-3 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm font-medium text-red-800">Live card payments are not yet enabled on this deployment, so this milestone was <strong>not funded</strong> and no money is being held.</p>}
       {config.demoMode ? (
         <div className="mt-3 rounded-xl border border-action/50 bg-amber-50 px-4 py-3 text-sm text-amber-900">
           <strong>DEMO checkout:</strong> this is a simulated Stripe test checkout. No card is charged and no real money moves. In production this step is Stripe-hosted — card details never touch Localent servers.

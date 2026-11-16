@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import type Stripe from "stripe";
 import { getStripe } from "@/lib/adapters";
 import { adapter, db } from "@/lib/store";
+import { nowIso, uid } from "@/lib/utils";
 
 // Stripe webhook — the ONLY place live payment state is confirmed (blueprint
 // §1/§4.2: webhooks, never browser redirects). Signature-verified with
@@ -38,6 +39,18 @@ export async function POST(req: NextRequest) {
         mutated = true;
         const pay = db().payments.find((p) => p.milestoneId === ms.id);
         if (pay && pay.status === "REQUIRES_PAYMENT") pay.status = "HELD";
+        if (!pay) {
+          // Backstop completeness: Stripe confirmed funds the app never
+          // ledgered (e.g. the funding action's own write failed after
+          // confirmation). Create the payments row with the same split math
+          // fundMilestoneAction uses, so milestone and ledger can't disagree.
+          const bid = db().bids.find((b) => b.id === ms.bidId);
+          if (bid) {
+            const feeShare = Math.round((bid.customerFeeCents * ms.amountCents) / bid.totalAmountCents);
+            const commissionShare = Math.round((bid.proCommissionCents * ms.amountCents) / bid.totalAmountCents);
+            db().payments.push({ id: uid("pay"), jobId: ms.jobId, milestoneId: ms.id, paymentIntentId: pi.id, transferId: null, grossCents: ms.amountCents + feeShare, customerFeeCents: feeShare, commissionCents: commissionShare, netCents: ms.amountCents - commissionShare, status: "HELD", createdAt: nowIso() });
+          }
+        }
       }
       break;
     }

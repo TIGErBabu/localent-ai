@@ -64,16 +64,29 @@ export async function createConnectAccountLink(accountId: string, refreshUrl: st
   return { mode: "live", url: link.url };
 }
 
-export interface PaymentResult { mode: "demo" | "live"; paymentIntentId: string; clientSecret: string | null; note: string }
+// Which kind of Stripe key is configured. Only TEST keys may auto-confirm a
+// PaymentIntent server-side (with Stripe's test payment method); a LIVE key
+// must never be paired with an invented payment method — real card collection
+// (Checkout/Elements) is a separate, deliberate build.
+export function stripeKeyKind(): "test" | "live" | null {
+  const key = process.env.STRIPE_SECRET_KEY;
+  if (!key) return null;
+  return key.startsWith("sk_test_") ? "test" : "live";
+}
+
+export interface PaymentResult { mode: "demo" | "live"; paymentIntentId: string; clientSecret: string | null; status: string; note: string }
 export async function chargeToEscrow(jobId: string, amountCents: number, opts?: { milestoneId?: string }): Promise<PaymentResult> {
   const stripe = getStripe();
   if (!stripe) {
-    return { mode: "demo", paymentIntentId: `pi_demo_${jobId.replace(/[^a-z0-9]/gi, "")}_${Date.now().toString(36)}`, clientSecret: null, note: "Simulated Stripe test charge — no real money moved. Set STRIPE_SECRET_KEY to go live." };
+    return { mode: "demo", paymentIntentId: `pi_demo_${jobId.replace(/[^a-z0-9]/gi, "")}_${Date.now().toString(36)}`, clientSecret: null, status: "succeeded", note: "Simulated Stripe test charge — no real money moved. Set STRIPE_SECRET_KEY to go live." };
   }
   // Separate Charges and Transfers (blueprint §1/§4.2): the charge lands on the
   // PLATFORM account; transfer_group ties it to the job so the completion
   // Transfer pays the pro's net and the commission simply never leaves.
-  // Confirmation of funds happens in /api/webhooks/stripe — never on redirect.
+  // Creating a PaymentIntent alone moves NO money — it sits "Incomplete"
+  // until confirmed. The caller may only treat funds as held when the
+  // returned status is "succeeded" (the payment_intent.succeeded webhook in
+  // /api/webhooks/stripe remains the backstop for out-of-band confirmation).
   const pi = await stripe.paymentIntents.create({
     amount: amountCents,
     currency: "usd",
@@ -82,7 +95,16 @@ export async function chargeToEscrow(jobId: string, amountCents: number, opts?: 
     metadata: { jobId, milestoneId: opts?.milestoneId ?? "" },
     description: `Localent escrow funding for job ${jobId}`,
   });
-  return { mode: "live", paymentIntentId: pi.id, clientSecret: pi.client_secret, note: "Live Stripe PaymentIntent created on the platform account." };
+  if (stripeKeyKind() === "test") {
+    // Test mode: confirm server-side with Stripe's test payment method so the
+    // one-click test checkout is HONEST — the PI really reaches "succeeded"
+    // (or this throws / returns a non-succeeded status and nothing is held).
+    const confirmed = await stripe.paymentIntents.confirm(pi.id, { payment_method: "pm_card_visa" });
+    return { mode: "live", paymentIntentId: pi.id, clientSecret: pi.client_secret, status: confirmed.status, note: `Test-mode PaymentIntent confirmed with pm_card_visa; Stripe status: ${confirmed.status}.` };
+  }
+  // Live key: do NOT auto-confirm with any payment method and do NOT let the
+  // caller mark funds held. Real card collection is not yet enabled.
+  return { mode: "live", paymentIntentId: pi.id, clientSecret: pi.client_secret, status: pi.status, note: "Live key configured: PaymentIntent created but NOT confirmed — live card collection is not yet enabled, no funds held." };
 }
 
 export async function transferToPro(stripeAccountId: string, amountCents: number, opts?: { jobId?: string; milestoneId?: string }): Promise<{ mode: "demo" | "live"; transferId: string }> {

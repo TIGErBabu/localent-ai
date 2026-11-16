@@ -11,7 +11,7 @@ import { adapter, db, findJob, findUserByEmail, acceptedBid, milestonesForJob, n
 import { canChat, isJobCustomer, isJobPro } from "@/lib/policy";
 import { computeSplit, maskContacts, money, nowIso, roundCoord, slugify, uid } from "@/lib/utils";
 import { config } from "@/lib/config";
-import { chargeToEscrow, createConnectAccount, createConnectAccountLink, getStripe, refundPaymentIntent, runBackgroundCheck, sendSms, transferToPro } from "@/lib/adapters";
+import { chargeToEscrow, createConnectAccount, createConnectAccountLink, getStripe, refundPaymentIntent, runBackgroundCheck, sendSms, stripeKeyKind, transferToPro } from "@/lib/adapters";
 import type { User } from "@/lib/types";
 
 const s = (fd: FormData, k: string) => String(fd.get(k) ?? "").trim();
@@ -167,7 +167,21 @@ export async function fundMilestoneAction(fd: FormData) {
   const bid = db().bids.find((b) => b.id === ms.bidId)!;
   const feeShare = Math.round((bid.customerFeeCents * ms.amountCents) / bid.totalAmountCents);
   const commissionShare = Math.round((bid.proCommissionCents * ms.amountCents) / bid.totalAmountCents);
-  const charge = await chargeToEscrow(job.id, ms.amountCents + feeShare, { milestoneId: ms.id });
+  const charge = await chargeToEscrow(job.id, ms.amountCents + feeShare, { milestoneId: ms.id }).catch((e) => {
+    console.error("[localent] chargeToEscrow failed", e);
+    return null;
+  });
+  // Truth-in-funding: a created-but-unconfirmed PaymentIntent holds NO money
+  // (it sits "Incomplete" in Stripe). The milestone may only become HELD when
+  // Stripe actually confirmed the payment — in demo mode the simulation
+  // reports "succeeded"; with a live Stripe key, anything short of a
+  // confirmed "succeeded" leaves the milestone UNFUNDED and tells the
+  // customer why (a live key never auto-confirms: live card collection via
+  // Checkout/Elements is not yet enabled).
+  if (!charge || (charge.mode === "live" && charge.status !== "succeeded")) {
+    const reason = charge && stripeKeyKind() === "live" ? "livecard" : "payment";
+    redirect(`/dashboard/customer/jobs/${job.id}/pay?error=${reason}`);
+  }
   ms.status = "HELD"; ms.paymentIntentId = charge.paymentIntentId;
   db().payments.push({ id: uid("pay"), jobId: job.id, milestoneId: ms.id, paymentIntentId: charge.paymentIntentId, transferId: null, grossCents: ms.amountCents + feeShare, customerFeeCents: feeShare, commissionCents: commissionShare, netCents: ms.amountCents - commissionShare, status: "HELD", createdAt: nowIso() });
   if (ms.seq === 1 && !job.completionCodeHash) {
