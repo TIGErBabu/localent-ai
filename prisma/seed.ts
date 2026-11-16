@@ -19,10 +19,10 @@
 // (paymentIntentId / transferId like "pi_demo_…", stripeAccountId, slugs)
 // are never routed through the map and pass through untouched.
 //
-// Like the rest of the Prisma layer, this file avoids a static
-// `@prisma/client` import (the client may not be generated in every
-// environment) and loads the constructor dynamically via createPrismaClient()
-// from lib/prisma-mapping.ts.
+// Like the rest of the Prisma layer, this file gets its client from
+// createPrismaClient() in lib/prisma-mapping.ts, which constructs it from
+// a static `@prisma/client` import (required so Next.js file tracing
+// ships the package in serverless bundles).
 //
 // The seed is idempotent-by-destruction: all tables are cleared in
 // reverse-FK order before inserting in FK order, so re-running it resets

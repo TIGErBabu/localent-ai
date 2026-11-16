@@ -1,12 +1,15 @@
 // ─── Prisma ⇄ StoreData mapping ──────────────────────────────────────────────
 // Conversion helpers between the app's in-memory shapes (lib/types.ts, served
 // by the DataAdapter in lib/store.ts) and Prisma row shapes
-// (prisma/schema.prisma). This module is deliberately free of any static
-// `@prisma/client` import: the generated client is not available in every
-// environment (e.g. sandboxes where the Prisma engine CDN is blocked), and a
-// static import would break `npx tsc --noEmit` / `next build` there. The
-// client surface is described structurally (PrismaClientLike below) and the
-// real constructor is loaded dynamically by createPrismaClient().
+// (prisma/schema.prisma). The client surface is described structurally
+// (PrismaClientLike below), but the real constructor comes from a STATIC
+// `@prisma/client` import — that is load-bearing, not stylistic: Next.js
+// file tracing can only follow static imports, and an earlier invisible
+// dynamic load (`new Function("return import(m)")`) left @prisma/client
+// out of the Vercel serverless bundle entirely, so every production
+// request failed with ERR_MODULE_NOT_FOUND. The generated client is a
+// committed build artifact of `prisma generate` (postinstall), so the
+// static import is safe wherever the package is installed.
 //
 // Shape differences handled here (types.ts vs schema.prisma):
 //  • JobPost: Prisma has NO `completionCode` column, only
@@ -65,6 +68,7 @@ import type {
   User,
   VerificationTier,
 } from "./types";
+import { PrismaClient } from "@prisma/client";
 
 // ─── Structural Prisma client surface (no generated types needed) ───────────
 
@@ -186,16 +190,11 @@ export const MODEL_ORDER: StoreKey[] = [
 /** Delete order: exact reverse of MODEL_ORDER so children go first. */
 export const DELETE_ORDER: StoreKey[] = [...MODEL_ORDER].reverse();
 
-// Dynamic import that bundlers/typecheckers cannot see — this is what keeps
-// the build green before `prisma generate` has run.
-const dynamicImport = new Function("m", "return import(m)") as (
-  m: string,
-) => Promise<Record<string, unknown>>;
-
 /**
- * Load and construct the real PrismaClient. Throws if @prisma/client cannot
- * be loaded or the client has not been generated — callers decide whether
- * that is fatal (seed) or degradable (adapter hydrate).
+ * Construct the real PrismaClient from the static import above. Throws if
+ * the client has not been generated or the datasource is misconfigured —
+ * callers decide whether that is fatal (seed) or degradable (adapter
+ * hydrate).
  */
 // Supabase serves the app through its transaction pooler (PgBouncer, port
 // 6543 / *.pooler.supabase.com). Prisma needs `pgbouncer=true` on pooled
@@ -214,17 +213,11 @@ function datasourceUrl(): string | undefined {
 }
 
 export async function createPrismaClient(): Promise<PrismaClientLike> {
-  const mod = await dynamicImport("@prisma/client");
-  const Ctor = mod.PrismaClient as unknown as
-    | (new (args?: { datasources?: { db?: { url?: string } } }) => PrismaClientLike)
-    | undefined;
-  if (typeof Ctor !== "function") {
-    throw new Error(
-      "@prisma/client loaded but PrismaClient was not found — run `npx prisma generate` first.",
-    );
-  }
   const url = datasourceUrl();
-  return url ? new Ctor({ datasources: { db: { url } } }) : new Ctor();
+  const client = url
+    ? new PrismaClient({ datasources: { db: { url } } })
+    : new PrismaClient();
+  return client as unknown as PrismaClientLike;
 }
 
 // ─── Scalar coercion helpers ────────────────────────────────────────────────

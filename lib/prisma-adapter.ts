@@ -19,8 +19,9 @@
 // while Prisma is async, so this adapter keeps a full StoreData cache in
 // memory — the same access pattern the demo adapter uses, which is what all
 // routes/helpers in lib/store.ts are written against. The constructor kicks
-// off hydrate(): it dynamically loads PrismaClient (no static @prisma/client
-// import, so builds stay green before `prisma generate`), findMany's all 19
+// off hydrate(): it constructs PrismaClient via createPrismaClient() (a
+// static @prisma/client import in lib/prisma-mapping.ts, so Next.js file
+// tracing ships the package in serverless bundles), findMany's all 19
 // models, converts them via rowsToStoreData(), and swaps the cache (which
 // starts as an empty StoreData skeleton). `ready` resolves when hydration
 // finishes — successfully or not.
