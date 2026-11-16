@@ -28,17 +28,17 @@
 // KNOWN LIMITATIONS:
 //  • Mutations made through data() (push / in-place edits, exactly how the
 //    demo adapter is used) live only in the cache until flush() is called.
-//    Nothing is written back automatically; callers that need durability
-//    must `await adapter.flush()` after mutating.
+//    Nothing is written back automatically; mutating callers `await
+//    adapter.flush()` when they are done (wired in app/actions.ts, the
+//    mutating API routes, the Stripe webhook, and lib/auth.ts sessions).
 //  • flush() is a full rewrite, not a diff: it deleteMany's every table in
 //    reverse-FK order and re-creates every cached row in FK order (via
 //    createMany). That keeps the logic trivially correct for this app's
 //    scale, but it is NOT transactional across models and assumes a single
 //    writer process — concurrent processes flushing will last-writer-win.
 //    Ids are written back with an identity map: rows hydrated from the DB
-//    already carry UUID ids. Rows created at runtime MUST also carry UUID
-//    ids (the demo-style ids like `ntf_xxxx` minted by lib/store.ts
-//    notify()/audit() will be rejected by the @db.Uuid columns on flush).
+//    already carry UUID ids, and rows created at runtime carry UUID ids too
+//    (lib/utils.ts uid() returns crypto.randomUUID()).
 //  • JobPost.completionCode (demo-only plaintext) is never persisted — only
 //    completionCodeHash reaches the database, and hydrated jobs always read
 //    completionCode: null. See lib/prisma-mapping.ts.
@@ -118,6 +118,12 @@ export class PrismaDataAdapter implements DataAdapter {
    */
   async flush(): Promise<void> {
     await this.ready;
+    if (!this.client) {
+      // Hydration failed at boot (e.g. the database was briefly unreachable).
+      // flush() is the recovery path: retry hydration once here rather than
+      // leaving data() permanently poisoned by the failed first attempt.
+      await this.hydrate();
+    }
     if (!this.client) {
       throw new Error(
         "PrismaDataAdapter.flush(): not connected (hydrate did not succeed) — cache was NOT persisted.",

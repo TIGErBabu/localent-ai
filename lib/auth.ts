@@ -1,6 +1,6 @@
 import { cookies } from "next/headers";
 import { randomBytes } from "crypto";
-import { db, findUser } from "./store";
+import { adapter, db, findUser } from "./store";
 import { sha256Hex } from "./password";
 import { ACCESS_TOKEN_TTL_SECONDS, signAccessToken } from "./jwt";
 import { ACCESS_COOKIE, REFRESH_COOKIE } from "./cookies";
@@ -31,6 +31,10 @@ export async function issueSession(user: User): Promise<void> {
     expiresAt: new Date(Date.now() + REFRESH_TTL_MS).toISOString(), revokedAt: null, createdAt: nowIso(),
   });
   jar.set(REFRESH_COOKIE, refresh, { ...cookieOpts(), maxAge: Math.floor(REFRESH_TTL_MS / 1000) });
+  // Persist the new token row (and any mutations the caller made just before
+  // issuing, e.g. registration pushes or a password change) — a session that
+  // only exists in the cache would vanish on the next cold start.
+  await adapter.flush();
 }
 
 export async function rotateSession(rawRefresh: string): Promise<User | null> {
@@ -51,10 +55,12 @@ export async function revokeSession(rawRefresh: string | null | undefined): Prom
   const jar = await cookies();
   jar.delete(ACCESS_COOKIE);
   jar.delete(REFRESH_COOKIE);
+  await adapter.flush();
 }
 
 export async function revokeAllSessions(userId: string): Promise<void> {
   for (const t of db().refreshTokens) {
     if (t.userId === userId && !t.revokedAt) t.revokedAt = nowIso();
   }
+  await adapter.flush();
 }

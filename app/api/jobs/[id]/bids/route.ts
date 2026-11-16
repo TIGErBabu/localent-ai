@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSessionUser } from "@/lib/session";
-import { db, findJob, notify, profileByUserId } from "@/lib/store";
+import { adapter, db, findJob, notify, profileByUserId } from "@/lib/store";
 import { computeSplit, money, nowIso, uid } from "@/lib/utils";
 import { config } from "@/lib/config";
 
@@ -28,5 +28,10 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
   };
   db().bids.push(bid);
   notify(job.customerId, "NEW_BID", `${profileByUserId(user.id)?.businessName ?? user.name} bid ${money(total)} on “${job.title}”.`, job.id);
+  try {
+    await adapter.flush();
+  } catch {
+    return NextResponse.json({ error: "bid could not be persisted" }, { status: 500 });
+  }
   return NextResponse.json({ bid }, { status: 201 });
 }

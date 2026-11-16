@@ -42,7 +42,7 @@ export default async function ProProfilePage({ searchParams }: { searchParams: P
         </div>
         <div>
           <label className="label" htmlFor="portfolioLabel">Portfolio — current items ({p.portfolioUrls.length}/8)</label>
-          <ul className="mb-2 flex flex-wrap gap-2">{p.portfolioUrls.map((u) => <li key={u} className="rounded-lg bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-600">🖼 {u.replace("demo://portfolio/", "")}</li>)}</ul>
+          <ul className="mb-2 flex flex-wrap gap-2">{p.portfolioUrls.map((u) => <li key={u} className="rounded-lg bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-600">🖼 {u.replace(/^(demo|pending):\/\/portfolio\//, "")}</li>)}</ul>
           <input id="portfolioLabel" name="portfolioLabel" className="input" placeholder="Add an item label, e.g. panel-upgrade-before-after" />
           <p className="mt-1 text-xs text-slate-400">Demo mode stores labels as placeholder keys; live mode uploads to private Supabase storage.</p>
         </div>

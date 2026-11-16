@@ -62,10 +62,12 @@ export default async function RegisterCustomerPage({
         </p>
       </section>
 
-      <p className="text-center text-xs text-slate-400">
-        Demo notice: this site runs on fictional demo data. The demo accounts and businesses shown are not real
-        people or companies.
-      </p>
+      {config.demoMode && (
+        <p className="text-center text-xs text-slate-400">
+          Demo notice: this site runs on fictional demo data. The demo accounts and businesses shown are not real
+          people or companies.
+        </p>
+      )}
     </div>
   );
 }

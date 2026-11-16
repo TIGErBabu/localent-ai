@@ -1,5 +1,6 @@
 import { requireRole } from "@/lib/session";
 import { db, milestonesForJob } from "@/lib/store";
+import { config } from "@/lib/config";
 import { money, fmtDate } from "@/lib/utils";
 import { ProNav } from "@/components/DashNav";
 import { connectPayoutsAction } from "@/app/actions";
@@ -18,8 +19,12 @@ export default async function ProWalletPage({ searchParams }: { searchParams: Pr
     <div>
       <ProNav active="wallet" />
       <h1 className="text-2xl font-extrabold text-slate-900">Payout wallet</h1>
-      <p className="mt-1 text-sm text-slate-500">Powered by Stripe Connect in production. Demo mode simulates onboarding and transfers — no real bank account is touched.</p>
-      {sp.connected && <p className="mt-3 rounded-xl bg-trust-soft px-4 py-3 text-sm font-semibold text-trust">Payouts connected (demo). You can now receive escrow releases.</p>}
+      {config.demoMode ? (
+        <p className="mt-1 text-sm text-slate-500">Powered by Stripe Connect in production. Demo mode simulates onboarding and transfers — no real bank account is touched.</p>
+      ) : (
+        <p className="mt-1 text-sm text-slate-500">Powered by Stripe Connect. Onboarding and payouts run through Stripe — escrow releases go straight to your bank account.</p>
+      )}
+      {sp.connected && <p className="mt-3 rounded-xl bg-trust-soft px-4 py-3 text-sm font-semibold text-trust">Payouts connected{config.demoMode ? " (demo)" : ""}. You can now receive escrow releases.</p>}
       <section className="card mt-5 p-5">
         <h3 className="font-bold text-slate-900">Stripe Connect account</h3>
         {acct ? (
@@ -31,7 +36,7 @@ export default async function ProWalletPage({ searchParams }: { searchParams: Pr
           </dl>
         ) : <p className="mt-2 text-sm text-slate-500">No payout account yet.</p>}
         {(!acct || !acct.payoutsEnabled) && (
-          <form action={connectPayoutsAction} className="mt-4"><button className="btn-action" type="submit">Connect payouts with Stripe (demo)</button></form>
+          <form action={connectPayoutsAction} className="mt-4"><button className="btn-action" type="submit">Connect payouts with Stripe{config.demoMode ? " (demo)" : ""}</button></form>
         )}
       </section>
       <div className="mt-4 grid gap-4 md:grid-cols-2">

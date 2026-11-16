@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import type Stripe from "stripe";
 import { getStripe } from "@/lib/adapters";
-import { db } from "@/lib/store";
+import { adapter, db } from "@/lib/store";
 
 // Stripe webhook — the ONLY place live payment state is confirmed (blueprint
 // §1/§4.2: webhooks, never browser redirects). Signature-verified with
@@ -25,6 +25,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Webhook signature verification failed." }, { status: 400 });
   }
 
+  let mutated = false;
   switch (event.type) {
     case "payment_intent.succeeded": {
       const pi = event.data.object as Stripe.PaymentIntent;
@@ -34,6 +35,7 @@ export async function POST(req: NextRequest) {
       if (ms && ms.status === "UNFUNDED") {
         ms.status = "HELD";
         ms.paymentIntentId = pi.id;
+        mutated = true;
         const pay = db().payments.find((p) => p.milestoneId === ms.id);
         if (pay && pay.status === "REQUIRES_PAYMENT") pay.status = "HELD";
       }
@@ -42,7 +44,7 @@ export async function POST(req: NextRequest) {
     case "payment_intent.payment_failed": {
       const pi = event.data.object as Stripe.PaymentIntent;
       const pay = db().payments.find((p) => p.paymentIntentId === pi.id);
-      if (pay && pay.status !== "RELEASED") pay.status = "FAILED";
+      if (pay && pay.status !== "RELEASED") { pay.status = "FAILED"; mutated = true; }
       break;
     }
     case "charge.refunded": {
@@ -50,9 +52,9 @@ export async function POST(req: NextRequest) {
       const piId = typeof charge.payment_intent === "string" ? charge.payment_intent : (charge.payment_intent?.id ?? null);
       if (piId) {
         const ms = db().paymentMilestones.find((m) => m.paymentIntentId === piId);
-        if (ms && ms.status === "HELD") ms.status = "REFUNDED";
+        if (ms && ms.status === "HELD") { ms.status = "REFUNDED"; mutated = true; }
         const pay = db().payments.find((p) => p.paymentIntentId === piId);
-        if (pay && pay.status !== "RELEASED") pay.status = "REFUNDED";
+        if (pay && pay.status !== "RELEASED") { pay.status = "REFUNDED"; mutated = true; }
       }
       break;
     }
@@ -63,11 +65,21 @@ export async function POST(req: NextRequest) {
         pa.payoutsEnabled = Boolean(account.payouts_enabled);
         pa.onboardingStatus = account.details_submitted ? "COMPLETE" : "PENDING";
         if (account.payouts_enabled) pa.kycStatus = "VERIFIED";
+        mutated = true;
       }
       break;
     }
     default:
       break; // Unhandled event types are acknowledged so Stripe stops retrying.
+  }
+  if (mutated) {
+    try {
+      await adapter.flush();
+    } catch {
+      // 500 (not 200) so Stripe retries delivery instead of the state change
+      // being lost with the in-memory cache.
+      return NextResponse.json({ error: "webhook state could not be persisted" }, { status: 500 });
+    }
   }
   return NextResponse.json({ received: true });
 }

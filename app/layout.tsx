@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import "./globals.css";
 import Header from "@/components/Header";
+import { config } from "@/lib/config";
 
 export const dynamic = "force-dynamic";
 
@@ -43,7 +44,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             </div>
             <div>
               <p className="font-semibold text-slate-700">Trust &amp; safety</p>
-              <p className="mt-2">Verified Pros pass a background check and licence review. Contact details stay masked until escrow is funded. Demo data on this site is fictional.</p>
+              <p className="mt-2">Verified Pros pass a background check and licence review. Contact details stay masked until escrow is funded.{config.demoMode && " Demo data on this site is fictional."}</p>
             </div>
           </div>
         </footer>

@@ -7,7 +7,7 @@ import { getSessionUser } from "@/lib/session";
 import { issueSession, revokeAllSessions, revokeSession } from "@/lib/auth";
 import { REFRESH_COOKIE } from "@/lib/cookies";
 import { hashPassword, sha256Hex, verifyPassword } from "@/lib/password";
-import { db, findJob, findUserByEmail, acceptedBid, milestonesForJob, notify, audit, matchProsForJob, profileByUserId, milestone1Funded } from "@/lib/store";
+import { adapter, db, findJob, findUserByEmail, acceptedBid, milestonesForJob, notify, audit, matchProsForJob, profileByUserId, milestone1Funded } from "@/lib/store";
 import { canChat, isJobCustomer, isJobPro } from "@/lib/policy";
 import { computeSplit, maskContacts, money, nowIso, roundCoord, slugify, uid } from "@/lib/utils";
 import { config } from "@/lib/config";
@@ -22,6 +22,17 @@ async function me(): Promise<User> {
   return u;
 }
 function completionCode(): string { return String(Math.floor(100000 + Math.random() * 900000)); }
+// Persist the adapter cache after an action mutates db() state. With the
+// Prisma adapter this writes through to Postgres; with the in-memory demo
+// adapter it is a no-op. A flush failure throws, so in production the action
+// fails loudly instead of pretending a write landed. (Auth actions below
+// don't call this directly: issueSession/revokeSession in lib/auth.ts flush
+// after issuing/revoking, which covers login, logout, registration and
+// password change.)
+async function persist(): Promise<void> { await adapter.flush(); }
+// Placeholder storage keys / payout ids for uploads and accounts that have
+// no live backend object yet. Demo-flavoured only while DEMO_MODE is on.
+const storageScheme = () => (config.demoMode ? "demo" : "pending");
 
 // ─── Auth (real: scrypt password check + JWT session, lib/auth.ts) ───────────
 export async function loginAction(fd: FormData) {
@@ -73,7 +84,7 @@ export async function registerProAction(fd: FormData) {
     serviceRadiusMiles: 25, locationLat: 29.6516, locationLng: -82.3248, locationLabel: config.metro,
     responseTimeHours: 4, yearsInBusiness: 1, createdAt: nowIso(),
   });
-  db().proPayoutAccounts.push({ id: uid("po"), userId: user.id, stripeAccountId: `acct_demo_${user.id}`, onboardingStatus: "NOT_STARTED", kycStatus: "NOT_STARTED", payoutsEnabled: false, createdAt: nowIso() });
+  db().proPayoutAccounts.push({ id: uid("po"), userId: user.id, stripeAccountId: config.demoMode ? `acct_demo_${user.id}` : `acct_pending_${user.id}`, onboardingStatus: "NOT_STARTED", kycStatus: "NOT_STARTED", payoutsEnabled: false, createdAt: nowIso() });
   await issueSession(user);
   redirect("/dashboard/pro");
 }
@@ -99,6 +110,7 @@ export async function postJobAction(fd: FormData) {
     const pro = db().users.find((u) => u.id === m.profile.userId);
     if (pro?.phoneNumber) await sendSms(pro.phoneNumber, `Localent: new ${job.category} lead — ${job.title}`);
   }
+  await persist();
   redirect(`/dashboard/customer/jobs/${jobId}`);
 }
 
@@ -119,6 +131,7 @@ export async function submitBidAction(fd: FormData) {
     expiresAt: new Date(Date.now() + 48 * 3600 * 1000).toISOString(), createdAt: nowIso(),
   });
   notify(job.customerId, "NEW_BID", `${profileByUserId(user.id)?.businessName ?? user.name} bid ${money(total)} on “${job.title}”.`, job.id);
+  await persist();
   redirect(`/dashboard/pro/jobs/${job.id}`);
 }
 export async function acceptBidAction(fd: FormData) {
@@ -136,6 +149,7 @@ export async function acceptBidAction(fd: FormData) {
     { id: uid("ms"), jobId: job.id, bidId: bid.id, seq: 2, label: "Balance on completion", amountCents: bid.totalAmountCents - m1, status: "UNFUNDED", paymentIntentId: null, transferId: null, createdAt: nowIso() },
   );
   notify(bid.proId, "SYSTEM", `Your bid was accepted for “${job.title}”. Waiting on the customer to fund the deposit.`, job.id);
+  await persist();
   redirect(`/dashboard/customer/jobs/${job.id}/pay`);
 }
 
@@ -160,6 +174,7 @@ export async function fundMilestoneAction(fd: FormData) {
     job.completionCode = config.demoMode ? code : null;
   }
   notify(bid.proId, "SYSTEM", `Deposit funded and held in escrow for “${job.title}”. The exact address is now visible to you.`, job.id);
+  await persist();
   redirect(`/dashboard/customer/jobs/${job.id}`);
 }
 async function releaseMilestone(msId: string, actor: User) {
@@ -168,7 +183,7 @@ async function releaseMilestone(msId: string, actor: User) {
   const job = findJob(ms.jobId)!;
   const bid = db().bids.find((b) => b.id === ms.bidId)!;
   const acct = db().proPayoutAccounts.find((a) => a.userId === bid.proId);
-  const t = await transferToPro(acct?.stripeAccountId ?? "acct_demo", ms.amountCents - Math.round((bid.proCommissionCents * ms.amountCents) / bid.totalAmountCents), { jobId: job.id, milestoneId: ms.id });
+  const t = await transferToPro(acct?.stripeAccountId ?? (config.demoMode ? "acct_demo" : `acct_pending_${bid.proId}`), ms.amountCents - Math.round((bid.proCommissionCents * ms.amountCents) / bid.totalAmountCents), { jobId: job.id, milestoneId: ms.id });
   ms.status = "RELEASED"; ms.transferId = t.transferId;
   const pay = db().payments.find((p) => p.milestoneId === ms.id);
   if (pay) { pay.status = "RELEASED"; pay.transferId = t.transferId; }
@@ -202,6 +217,7 @@ export async function scheduleAction(fd: FormData) {
   if (job.status === "ACCEPTED") job.status = "SCHEDULED";
   const other = user.id === job.customerId ? bid?.proId : job.customerId;
   if (other) notify(other, "APPOINTMENT", `Appointment ${isReschedule ? "rescheduled" : "set"} for “${job.title}”: ${s(fd, "date")}, ${s(fd, "windowStart")}–${s(fd, "windowEnd")}.`, job.id);
+  await persist();
   redirect(user.role === "PRO" ? `/dashboard/pro/jobs/${job.id}` : `/dashboard/customer/jobs/${job.id}/schedule`);
 }
 
@@ -218,6 +234,7 @@ export async function sendMessageAction(fd: FormData) {
   const bid = acceptedBid(job.id);
   const others = [job.customerId, bid?.proId].filter((x): x is string => !!x && x !== user.id);
   for (const o of others) notify(o, "MESSAGE", `New message on “${job.title}”.`, job.id);
+  await persist();
   revalidatePath(`/dashboard/customer/jobs/${job.id}`);
   revalidatePath(`/dashboard/pro/jobs/${job.id}`);
   redirect(s(fd, "back") || `/dashboard/customer/jobs/${job.id}`);
@@ -228,9 +245,10 @@ export async function checkInAction(fd: FormData) {
   const user = await me();
   const job = findJob(s(fd, "jobId"));
   if (!job || !isJobPro(user, job)) redirect("/dashboard/pro");
-  db().jobEvidence.push({ id: uid("ev"), jobId: job.id, uploadedBy: user.id, kind: "CHECKIN", storageKey: `demo://evidence/${job.id}/checkin-${Date.now()}`, createdAt: nowIso() });
+  db().jobEvidence.push({ id: uid("ev"), jobId: job.id, uploadedBy: user.id, kind: "CHECKIN", storageKey: `${storageScheme()}://evidence/${job.id}/checkin-${Date.now()}`, createdAt: nowIso() });
   if (job.status === "SCHEDULED" || job.status === "ACCEPTED") job.status = "IN_PROGRESS";
   notify(job.customerId, "SYSTEM", `Your pro checked in on site for “${job.title}”.`, job.id);
+  await persist();
   redirect(`/dashboard/pro/jobs/${job.id}`);
 }
 export async function addEvidenceAction(fd: FormData) {
@@ -238,7 +256,8 @@ export async function addEvidenceAction(fd: FormData) {
   const job = findJob(s(fd, "jobId"));
   if (!job || !isJobPro(user, job)) redirect("/dashboard/pro");
   const kind = s(fd, "kind") === "AFTER_PHOTO" ? "AFTER_PHOTO" : "BEFORE_PHOTO";
-  db().jobEvidence.push({ id: uid("ev"), jobId: job.id, uploadedBy: user.id, kind, storageKey: `demo://evidence/${job.id}/${kind.toLowerCase()}-${Date.now()}`, createdAt: nowIso() });
+  db().jobEvidence.push({ id: uid("ev"), jobId: job.id, uploadedBy: user.id, kind, storageKey: `${storageScheme()}://evidence/${job.id}/${kind.toLowerCase()}-${Date.now()}`, createdAt: nowIso() });
+  await persist();
   redirect(`/dashboard/pro/jobs/${job.id}`);
 }
 export async function proposeChangeOrderAction(fd: FormData) {
@@ -247,6 +266,7 @@ export async function proposeChangeOrderAction(fd: FormData) {
   if (!job || !isJobPro(user, job)) redirect("/dashboard/pro");
   db().changeOrders.push({ id: uid("co"), jobId: job.id, proId: user.id, description: s(fd, "description"), deltaAmountCents: Math.round(n(fd, "deltaDollars") * 100), status: "PROPOSED", approvedAt: null, createdAt: nowIso() });
   notify(job.customerId, "SYSTEM", `Change order proposed on “${job.title}”: ${money(Math.round(n(fd, "deltaDollars") * 100))}. Your approval is needed before extra work starts.`, job.id);
+  await persist();
   redirect(`/dashboard/pro/jobs/${job.id}`);
 }
 export async function decideChangeOrderAction(fd: FormData) {
@@ -266,6 +286,7 @@ export async function decideChangeOrderAction(fd: FormData) {
   } else {
     notify(co.proId, "SYSTEM", `Change order declined on “${job.title}”.`, job.id);
   }
+  await persist();
   redirect(`/dashboard/customer/jobs/${job.id}`);
 }
 export async function requestCompletionAction(fd: FormData) {
@@ -282,6 +303,7 @@ export async function requestCompletionAction(fd: FormData) {
     redirect(`/dashboard/pro/jobs/${job.id}?error=evidence`);
   job.completionRequestedAt = nowIso();
   notify(job.customerId, "SYSTEM", `Your pro reports “${job.title}” complete and entered your confirmation code. Confirm to release the balance — it auto-releases after ${config.autoReleaseHours}h if you do nothing and raise no dispute.`, job.id);
+  await persist();
   redirect(`/dashboard/pro/jobs/${job.id}?done=requested`);
 }
 export async function confirmCompletionAction(fd: FormData) {
@@ -294,6 +316,7 @@ export async function confirmCompletionAction(fd: FormData) {
   job.status = "COMPLETED";
   const appt = db().appointments.find((a) => a.jobId === job.id);
   if (appt) appt.status = "DONE";
+  await persist();
   redirect(`/dashboard/customer/jobs/${job.id}/review`);
 }
 
@@ -304,6 +327,7 @@ export async function openDisputeAction(fd: FormData) {
   if (!job || !(isJobCustomer(user, job) || isJobPro(user, job))) redirect("/login");
   job.status = "DISPUTED";
   db().disputes.push({ id: uid("disp"), jobId: job.id, openedBy: user.id, reason: s(fd, "reason"), status: "OPEN", resolution: null, createdAt: nowIso(), resolvedAt: null });
+  await persist();
   redirect(user.role === "PRO" ? `/dashboard/pro/jobs/${job.id}` : `/dashboard/customer/jobs/${job.id}`);
 }
 export async function submitReviewAction(fd: FormData) {
@@ -314,11 +338,13 @@ export async function submitReviewAction(fd: FormData) {
   if (db().reviews.some((r) => r.jobId === job.id && r.proId === bid.proId && r.customerId === user.id))
     redirect(`/dashboard/customer/jobs/${job.id}`);
   db().reviews.push({ id: uid("rev"), jobId: job.id, customerId: user.id, proId: bid.proId, ratingValue: Math.min(5, Math.max(1, n(fd, "rating") || 5)), reviewText: s(fd, "text"), createdAt: nowIso() });
+  await persist();
   redirect(`/pros/${profileByUserId(bid.proId)?.slug ?? ""}`);
 }
 export async function reportProfileAction(fd: FormData) {
   const user = await me();
   db().reports.push({ id: uid("rep"), reporterId: user.id, targetType: "USER", targetId: s(fd, "targetId"), reason: s(fd, "reason"), status: "OPEN", createdAt: nowIso() });
+  await persist();
   redirect(`/pros/${s(fd, "slug")}?reported=1`);
 }
 
@@ -332,7 +358,8 @@ export async function updateProfileAction(fd: FormData) {
   p.skillsArray = fd.getAll("skills").map(String).filter(Boolean);
   p.serviceRadiusMiles = n(fd, "radius") || p.serviceRadiusMiles;
   p.responseTimeHours = n(fd, "responseTime") || p.responseTimeHours;
-  if (s(fd, "portfolioLabel")) p.portfolioUrls = [...p.portfolioUrls, `demo://portfolio/${slugify(s(fd, "portfolioLabel"))}`].slice(0, 8);
+  if (s(fd, "portfolioLabel")) p.portfolioUrls = [...p.portfolioUrls, `${storageScheme()}://portfolio/${slugify(s(fd, "portfolioLabel"))}`].slice(0, 8);
+  await persist();
   redirect("/dashboard/pro/profile?saved=1");
 }
 export async function updateAvailabilityAction(fd: FormData) {
@@ -341,6 +368,7 @@ export async function updateAvailabilityAction(fd: FormData) {
   for (let d = 0; d <= 6; d++) {
     if (fd.get(`day-${d}`)) db().proAvailability.push({ id: uid("av"), proId: user.id, weekday: d, startTime: s(fd, `start-${d}`) || "08:00", endTime: s(fd, `end-${d}`) || "17:00" });
   }
+  await persist();
   redirect("/dashboard/pro/availability?saved=1");
 }
 export async function submitVerificationAction(fd: FormData) {
@@ -351,6 +379,7 @@ export async function submitVerificationAction(fd: FormData) {
   const bg = await runBackgroundCheck(user.id, { name: user.name, email: user.email });
   p.backgroundCheckStatus = bg.status;
   notify("u-admin", "SYSTEM", `${p.businessName} submitted verification documents (${p.licenceTrade} licence ${p.licenceNumber}).`, null);
+  await persist();
   redirect("/dashboard/pro/profile?verification=submitted");
 }
 export async function connectPayoutsAction() {
@@ -361,22 +390,25 @@ export async function connectPayoutsAction() {
     // Live path: create the pro's Connect Express account if they only have a
     // demo placeholder, then send them to Stripe-hosted onboarding. Status
     // flips back via the account.updated webhook.
-    if (!acct.stripeAccountId.startsWith("acct_") || acct.stripeAccountId.startsWith("acct_demo")) {
+    if (!acct.stripeAccountId.startsWith("acct_") || acct.stripeAccountId.startsWith("acct_demo") || acct.stripeAccountId.startsWith("acct_pending")) {
       const created = await createConnectAccount(user);
       acct.stripeAccountId = created.accountId;
       acct.onboardingStatus = "PENDING";
     }
     const base = process.env.NEXT_PUBLIC_APP_URL ?? "https://localent-ai.vercel.app";
     const link = await createConnectAccountLink(acct.stripeAccountId, `${base}/dashboard/pro/wallet?refresh=1`, `${base}/dashboard/pro/wallet?connected=1`);
+    await persist();
     redirect(link.url);
   }
   acct.onboardingStatus = "COMPLETE"; acct.kycStatus = "VERIFIED"; acct.payoutsEnabled = true;
+  await persist();
   redirect("/dashboard/pro/wallet?connected=1");
 }
 export async function updateSettingsAction(fd: FormData) {
   const user = await me();
   user.name = s(fd, "name") || user.name;
   user.phoneNumber = s(fd, "phone") || user.phoneNumber;
+  await persist();
   redirect(user.role === "PRO" ? "/dashboard/pro" : "/dashboard/customer/settings?saved=1");
 }
 
@@ -398,6 +430,7 @@ export async function adminVerifyAction(fd: FormData) {
     audit(admin, "REJECT_VERIFICATION", "COMPANY_PROFILE", p.id, s(fd, "note") || "Documents did not pass review.");
     notify(p.userId, "SYSTEM", "Your verification submission was not approved. Check your profile for what to resubmit.", null);
   }
+  await persist();
   redirect("/admin/verifications");
 }
 export async function adminResolveDisputeAction(fd: FormData) {
@@ -420,6 +453,7 @@ export async function adminResolveDisputeAction(fd: FormData) {
   }
   d.resolution = s(fd, "note") || (release ? "Released to pro after review." : "Refunded to customer after review.");
   d.resolvedAt = nowIso();
+  await persist();
   redirect("/admin/disputes");
 }
 export async function adminReportAction(fd: FormData) {
@@ -429,6 +463,7 @@ export async function adminReportAction(fd: FormData) {
   if (r) {
     r.status = s(fd, "decision") === "dismiss" ? "DISMISSED" : "REVIEWED";
     audit(admin, "REPORT_" + r.status, "REPORT", r.id, `Report marked ${r.status}.`);
+    await persist();
   }
   redirect("/admin/reports");
 }

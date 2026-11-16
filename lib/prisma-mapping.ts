@@ -197,17 +197,34 @@ const dynamicImport = new Function("m", "return import(m)") as (
  * be loaded or the client has not been generated — callers decide whether
  * that is fatal (seed) or degradable (adapter hydrate).
  */
+// Supabase serves the app through its transaction pooler (PgBouncer, port
+// 6543 / *.pooler.supabase.com). Prisma needs `pgbouncer=true` on pooled
+// URLs to disable prepared statements, which transaction pooling cannot
+// support. Append it when the configured DATABASE_URL points at the pooler
+// and doesn't already carry it; direct URLs (DIRECT_URL, local Postgres)
+// are passed through untouched.
+function datasourceUrl(): string | undefined {
+  const url = process.env.DATABASE_URL;
+  if (!url) return undefined;
+  const isPooler = url.includes("pooler.supabase.com") || url.includes(":6543");
+  if (isPooler && !/[?&]pgbouncer=true/.test(url)) {
+    return url + (url.includes("?") ? "&" : "?") + "pgbouncer=true";
+  }
+  return url;
+}
+
 export async function createPrismaClient(): Promise<PrismaClientLike> {
   const mod = await dynamicImport("@prisma/client");
   const Ctor = mod.PrismaClient as unknown as
-    | (new () => PrismaClientLike)
+    | (new (args?: { datasources?: { db?: { url?: string } } }) => PrismaClientLike)
     | undefined;
   if (typeof Ctor !== "function") {
     throw new Error(
       "@prisma/client loaded but PrismaClient was not found — run `npx prisma generate` first.",
     );
   }
-  return new Ctor();
+  const url = datasourceUrl();
+  return url ? new Ctor({ datasources: { db: { url } } }) : new Ctor();
 }
 
 // ─── Scalar coercion helpers ────────────────────────────────────────────────

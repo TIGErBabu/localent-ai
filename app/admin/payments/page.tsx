@@ -1,4 +1,5 @@
 import { db, findJob } from "@/lib/store";
+import { config } from "@/lib/config";
 import { money, fmtDateTime } from "@/lib/utils";
 import { Empty } from "@/components/ui";
 import { requireRole } from "@/lib/session";
@@ -108,11 +109,18 @@ export default async function AdminPaymentsPage() {
         </div>
       )}
 
-      <p className="mt-4 text-xs text-slate-500">
-        Demo payment intent ids are simulated (pi_demo_…) and do not correspond to live Stripe charges. In live mode this ledger
-        reconciles against Stripe webhooks — match on paymentIntentId, then compare gross, customer fee, commission and net before
-        marking a milestone released.
-      </p>
+      {config.demoMode ? (
+        <p className="mt-4 text-xs text-slate-500">
+          Demo payment intent ids are simulated (pi_demo_…) and do not correspond to live Stripe charges. In live mode this ledger
+          reconciles against Stripe webhooks — match on paymentIntentId, then compare gross, customer fee, commission and net before
+          marking a milestone released.
+        </p>
+      ) : (
+        <p className="mt-4 text-xs text-slate-500">
+          This ledger reconciles against Stripe webhooks — match on paymentIntentId, then compare gross, customer fee, commission
+          and net before marking a milestone released.
+        </p>
+      )}
     </div>
   );
 }

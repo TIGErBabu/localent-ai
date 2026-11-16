@@ -1,7 +1,7 @@
 import type { CompanyProfile, JobPost, StoreData, User } from "./types";
 import { buildSeed } from "./seed";
 import { config } from "./config";
-import { haversineMiles, inBoundingBox } from "./utils";
+import { haversineMiles, inBoundingBox, uid } from "./utils";
 
 // ─── Data adapter interface ──────────────────────────────────────────────────
 // Production implementation: PrismaClient against Supabase Postgres
@@ -10,12 +10,18 @@ import { haversineMiles, inBoundingBox } from "./utils";
 // runs end-to-end with no external accounts.
 export interface DataAdapter {
   data(): StoreData;
+  // Persist any mutations made through data(). Callers MUST await this after
+  // mutating (server actions do — see app/actions.ts). The Prisma adapter
+  // writes the cache through to Postgres; the in-memory adapter has nothing
+  // to persist, so its flush is a no-op.
+  flush(): Promise<void>;
 }
 
 class InMemoryAdapter implements DataAdapter {
   private store: StoreData;
   constructor() { this.store = buildSeed(); }
   data(): StoreData { return this.store; }
+  async flush(): Promise<void> { /* in-memory store: nothing to persist */ }
 }
 
 // Adapter selection is env-driven: DATA_ADAPTER=memory (default) serves the
@@ -75,13 +81,13 @@ export function matchProsForJob(job: JobPost): MatchedPro[] {
 
 export function notify(userId: string, kind: string, text: string, jobId: string | null) {
   db().notifications.push({
-    id: `ntf_${Math.random().toString(36).slice(2, 10)}`, userId, kind, text, jobId,
+    id: uid("ntf"), userId, kind, text, jobId,
     read: false, smsSent: false, createdAt: new Date().toISOString(),
   });
 }
 export function audit(admin: User, action: string, targetType: string, targetId: string, detail: string) {
   db().adminAuditLogs.push({
-    id: `audit_${Math.random().toString(36).slice(2, 10)}`, adminId: admin.id, action,
+    id: uid("audit"), adminId: admin.id, action,
     targetType, targetId, detail, createdAt: new Date().toISOString(),
   });
 }

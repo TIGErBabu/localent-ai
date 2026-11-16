@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSessionUser } from "@/lib/session";
-import { db, matchProsForJob, notify } from "@/lib/store";
+import { adapter, db, matchProsForJob, notify } from "@/lib/store";
 import { canViewJob } from "@/lib/policy";
 import { nowIso, roundCoord, uid } from "@/lib/utils";
 import { config } from "@/lib/config";
@@ -34,5 +34,10 @@ export async function POST(req: NextRequest) {
   db().jobPrivateDetails.push({ jobId, streetAddress: String(body.streetAddress), unit: body.unit ?? null, zip: String(body.zip ?? ""), accessNotes: body.accessNotes ?? null });
   const matched = matchProsForJob(job);
   for (const m of matched) notify(m.profile.userId, "NEW_LEAD", `New ${job.category} lead near ${job.locationLabel}: ${job.title}`, jobId);
+  try {
+    await adapter.flush();
+  } catch {
+    return NextResponse.json({ error: "job could not be persisted" }, { status: 500 });
+  }
   return NextResponse.json({ job, matchedProCount: matched.length }, { status: 201 });
 }

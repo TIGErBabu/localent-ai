@@ -112,9 +112,11 @@ export default async function RegisterProPage({
             your dashboard after signing up.
           </li>
         </ul>
-        <p className="mt-3 text-xs text-slate-400">
-          Demo notice: this site runs on fictional demo data, and verification in the demo is simulated.
-        </p>
+        {config.demoMode && (
+          <p className="mt-3 text-xs text-slate-400">
+            Demo notice: this site runs on fictional demo data, and verification in the demo is simulated.
+          </p>
+        )}
       </section>
     </div>
   );

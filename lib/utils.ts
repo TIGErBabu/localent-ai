@@ -1,8 +1,11 @@
 export function money(cents: number): string {
   return (cents / 100).toLocaleString("en-US", { style: "currency", currency: "USD", maximumFractionDigits: cents % 100 === 0 ? 0 : 2 });
 }
-export function uid(prefix: string): string {
-  return `${prefix}_${Math.random().toString(36).slice(2, 10)}${Date.now().toString(36).slice(-4)}`;
+// Ids are bare UUIDs: every DB id column is @db.Uuid, so prefixed demo-style
+// ids (u-cust_…, job_…) would be rejected on insert. The prefix argument is
+// kept for call-site readability only and is no longer part of the id.
+export function uid(_prefix: string): string {
+  return crypto.randomUUID();
 }
 export function nowIso(): string { return new Date().toISOString(); }
 export function fmtDate(iso: string | null): string {
