@@ -27,6 +27,11 @@ export default async function RegisterCustomerPage({
             <Link href="/login" className="underline">logging in</Link> instead.
           </p>
         )}
+        {sp.error === "weak" && (
+          <p className="mt-4 rounded-lg bg-red-50 px-4 py-3 text-sm font-semibold text-red-700" role="alert">
+            Please choose a password of at least 8 characters.
+          </p>
+        )}
 
         <form action={registerCustomerAction} className="mt-6 space-y-4">
           <div>

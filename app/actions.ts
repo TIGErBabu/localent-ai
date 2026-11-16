@@ -3,21 +3,19 @@
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
-import { SESSION_COOKIE, getSessionUser } from "@/lib/session";
+import { getSessionUser } from "@/lib/session";
+import { issueSession, revokeAllSessions, revokeSession } from "@/lib/auth";
+import { REFRESH_COOKIE } from "@/lib/cookies";
+import { hashPassword, sha256Hex, verifyPassword } from "@/lib/password";
 import { db, findJob, findUserByEmail, acceptedBid, milestonesForJob, notify, audit, matchProsForJob, profileByUserId, milestone1Funded } from "@/lib/store";
 import { canChat, isJobCustomer, isJobPro } from "@/lib/policy";
 import { computeSplit, maskContacts, money, nowIso, roundCoord, slugify, uid } from "@/lib/utils";
 import { config } from "@/lib/config";
-import { chargeToEscrow, refundPaymentIntent, runBackgroundCheck, sendSms, transferToPro } from "@/lib/adapters";
+import { chargeToEscrow, createConnectAccount, createConnectAccountLink, getStripe, refundPaymentIntent, runBackgroundCheck, sendSms, transferToPro } from "@/lib/adapters";
 import type { User } from "@/lib/types";
 
 const s = (fd: FormData, k: string) => String(fd.get(k) ?? "").trim();
 const n = (fd: FormData, k: string) => Number(fd.get(k) ?? 0);
-
-async function setSession(user: User) {
-  const jar = await cookies();
-  jar.set(SESSION_COOKIE, `${user.id}.${user.role}`, { httpOnly: true, sameSite: "lax", path: "/", maxAge: 60 * 60 * 24 * 7 });
-}
 async function me(): Promise<User> {
   const u = await getSessionUser();
   if (!u) redirect("/login");
@@ -25,30 +23,45 @@ async function me(): Promise<User> {
 }
 function completionCode(): string { return String(Math.floor(100000 + Math.random() * 900000)); }
 
-// ─── Auth ────────────────────────────────────────────────────────────────────
+// ─── Auth (real: scrypt password check + JWT session, lib/auth.ts) ───────────
 export async function loginAction(fd: FormData) {
   const user = findUserByEmail(s(fd, "email"));
-  if (!user || user.passwordHash !== s(fd, "password")) redirect("/login?error=1");
-  await setSession(user);
+  if (!user || !verifyPassword(s(fd, "password"), user.passwordHash)) redirect("/login?error=1");
+  // One-click demo accounts exist only while DEMO_MODE is on.
+  if (user.email.endsWith("@localent.demo") && !config.demoMode) redirect("/login?error=demooff");
+  await issueSession(user);
   redirect(user.role === "ADMIN" ? "/admin" : user.role === "PRO" ? "/dashboard/pro" : "/dashboard/customer");
 }
 export async function logoutAction() {
-  const jar = await cookies();
-  jar.delete(SESSION_COOKIE);
+  const raw = (await cookies()).get(REFRESH_COOKIE)?.value;
+  await revokeSession(raw);
   redirect("/");
+}
+export async function changePasswordAction(fd: FormData) {
+  const user = await me();
+  const back = s(fd, "back") || (user.role === "PRO" ? "/dashboard/pro/profile" : "/dashboard/customer/settings");
+  if (!verifyPassword(s(fd, "currentPassword"), user.passwordHash)) redirect(`${back}?pw=error`);
+  const next = s(fd, "newPassword");
+  if (next.length < 8) redirect(`${back}?pw=weak`);
+  user.passwordHash = hashPassword(next);
+  await revokeAllSessions(user.id); // every other session dies; this device re-signs below
+  await issueSession(user);
+  redirect(`${back}?pw=saved`);
 }
 export async function registerCustomerAction(fd: FormData) {
   const email = s(fd, "email");
   if (findUserByEmail(email)) redirect("/register/customer?error=exists");
-  const user: User = { id: uid("u-cust"), email, passwordHash: s(fd, "password") || "demo", role: "CUSTOMER", name: s(fd, "name"), phoneNumber: s(fd, "phone") || null, phoneVerified: false, createdAt: nowIso() };
+  if (s(fd, "password").length < 8) redirect("/register/customer?error=weak");
+  const user: User = { id: uid("u-cust"), email, passwordHash: hashPassword(s(fd, "password")), role: "CUSTOMER", name: s(fd, "name"), phoneNumber: s(fd, "phone") || null, phoneVerified: false, createdAt: nowIso() };
   db().users.push(user);
-  await setSession(user);
+  await issueSession(user);
   redirect("/dashboard/customer");
 }
 export async function registerProAction(fd: FormData) {
   const email = s(fd, "email");
   if (findUserByEmail(email)) redirect("/register/pro?error=exists");
-  const user: User = { id: uid("u-pro"), email, passwordHash: s(fd, "password") || "demo", role: "PRO", name: s(fd, "name"), phoneNumber: s(fd, "phone") || null, phoneVerified: false, createdAt: nowIso() };
+  if (s(fd, "password").length < 8) redirect("/register/pro?error=weak");
+  const user: User = { id: uid("u-pro"), email, passwordHash: hashPassword(s(fd, "password")), role: "PRO", name: s(fd, "name"), phoneNumber: s(fd, "phone") || null, phoneVerified: false, createdAt: nowIso() };
   db().users.push(user);
   const business = s(fd, "business");
   let slug = slugify(business); let i = 2;
@@ -61,7 +74,7 @@ export async function registerProAction(fd: FormData) {
     responseTimeHours: 4, yearsInBusiness: 1, createdAt: nowIso(),
   });
   db().proPayoutAccounts.push({ id: uid("po"), userId: user.id, stripeAccountId: `acct_demo_${user.id}`, onboardingStatus: "NOT_STARTED", kycStatus: "NOT_STARTED", payoutsEnabled: false, createdAt: nowIso() });
-  await setSession(user);
+  await issueSession(user);
   redirect("/dashboard/pro");
 }
 
@@ -76,7 +89,7 @@ export async function postJobAction(fd: FormData) {
     budgetMaxCents: Math.round(n(fd, "budgetMax") * 100),
     locationLat: roundCoord(29.6516 + (Math.random() - 0.5) * 0.04), locationLng: roundCoord(-82.3248 + (Math.random() - 0.5) * 0.04),
     locationLabel: `${config.metro} (approx.)`, status: "OPEN" as const, preferredDate: s(fd, "preferredDate") || null,
-    matchedProLimit: config.matchedProLimit, completionCode: null, completionRequestedAt: null, createdAt: nowIso(),
+    matchedProLimit: config.matchedProLimit, completionCode: null, completionCodeHash: null, completionRequestedAt: null, createdAt: nowIso(),
   };
   db().jobPosts.push(job);
   db().jobPrivateDetails.push({ jobId, streetAddress: s(fd, "streetAddress"), unit: s(fd, "unit") || null, zip: s(fd, "zip"), accessNotes: s(fd, "accessNotes") || null });
@@ -135,10 +148,17 @@ export async function fundMilestoneAction(fd: FormData) {
   const bid = db().bids.find((b) => b.id === ms.bidId)!;
   const feeShare = Math.round((bid.customerFeeCents * ms.amountCents) / bid.totalAmountCents);
   const commissionShare = Math.round((bid.proCommissionCents * ms.amountCents) / bid.totalAmountCents);
-  const charge = await chargeToEscrow(job.id, ms.amountCents + feeShare);
+  const charge = await chargeToEscrow(job.id, ms.amountCents + feeShare, { milestoneId: ms.id });
   ms.status = "HELD"; ms.paymentIntentId = charge.paymentIntentId;
   db().payments.push({ id: uid("pay"), jobId: job.id, milestoneId: ms.id, paymentIntentId: charge.paymentIntentId, transferId: null, grossCents: ms.amountCents + feeShare, customerFeeCents: feeShare, commissionCents: commissionShare, netCents: ms.amountCents - commissionShare, status: "HELD", createdAt: nowIso() });
-  if (ms.seq === 1 && !job.completionCode) job.completionCode = completionCode(); // issued to customer at funding
+  if (ms.seq === 1 && !job.completionCodeHash) {
+    // Completion code issued to the customer at funding. The sha256 hash is
+    // ALWAYS stored; the readable code is kept only in DEMO_MODE — production
+    // stores the hash only and shows the code once at funding time.
+    const code = completionCode();
+    job.completionCodeHash = sha256Hex(code);
+    job.completionCode = config.demoMode ? code : null;
+  }
   notify(bid.proId, "SYSTEM", `Deposit funded and held in escrow for “${job.title}”. The exact address is now visible to you.`, job.id);
   redirect(`/dashboard/customer/jobs/${job.id}`);
 }
@@ -148,7 +168,7 @@ async function releaseMilestone(msId: string, actor: User) {
   const job = findJob(ms.jobId)!;
   const bid = db().bids.find((b) => b.id === ms.bidId)!;
   const acct = db().proPayoutAccounts.find((a) => a.userId === bid.proId);
-  const t = await transferToPro(acct?.stripeAccountId ?? "acct_demo", ms.amountCents - Math.round((bid.proCommissionCents * ms.amountCents) / bid.totalAmountCents));
+  const t = await transferToPro(acct?.stripeAccountId ?? "acct_demo", ms.amountCents - Math.round((bid.proCommissionCents * ms.amountCents) / bid.totalAmountCents), { jobId: job.id, milestoneId: ms.id });
   ms.status = "RELEASED"; ms.transferId = t.transferId;
   const pay = db().payments.find((p) => p.milestoneId === ms.id);
   if (pay) { pay.status = "RELEASED"; pay.transferId = t.transferId; }
@@ -252,7 +272,11 @@ export async function requestCompletionAction(fd: FormData) {
   const user = await me();
   const job = findJob(s(fd, "jobId"));
   if (!job || !isJobPro(user, job)) redirect("/dashboard/pro");
-  if (!job.completionCode || s(fd, "code") !== job.completionCode) redirect(`/dashboard/pro/jobs/${job.id}?error=code`);
+  const providedCode = s(fd, "code");
+  const codeOk =
+    (!!job.completionCodeHash && sha256Hex(providedCode) === job.completionCodeHash) ||
+    (config.demoMode && !!job.completionCode && providedCode === job.completionCode);
+  if (!codeOk) redirect(`/dashboard/pro/jobs/${job.id}?error=code`);
   const ev = db().jobEvidence.filter((e) => e.jobId === job.id);
   if (!ev.some((e) => e.kind === "BEFORE_PHOTO") || !ev.some((e) => e.kind === "AFTER_PHOTO"))
     redirect(`/dashboard/pro/jobs/${job.id}?error=evidence`);
@@ -324,7 +348,7 @@ export async function submitVerificationAction(fd: FormData) {
   const p = profileByUserId(user.id);
   if (!p) redirect("/dashboard/pro");
   p.licenceNumber = s(fd, "licenceNumber"); p.licenceTrade = s(fd, "licenceTrade"); p.licenceState = s(fd, "licenceState") || "FL";
-  const bg = await runBackgroundCheck(user.id);
+  const bg = await runBackgroundCheck(user.id, { name: user.name, email: user.email });
   p.backgroundCheckStatus = bg.status;
   notify("u-admin", "SYSTEM", `${p.businessName} submitted verification documents (${p.licenceTrade} licence ${p.licenceNumber}).`, null);
   redirect("/dashboard/pro/profile?verification=submitted");
@@ -332,7 +356,21 @@ export async function submitVerificationAction(fd: FormData) {
 export async function connectPayoutsAction() {
   const user = await me();
   const acct = db().proPayoutAccounts.find((a) => a.userId === user.id);
-  if (acct) { acct.onboardingStatus = "COMPLETE"; acct.kycStatus = "VERIFIED"; acct.payoutsEnabled = true; }
+  if (!acct) redirect("/dashboard/pro/wallet");
+  if (getStripe()) {
+    // Live path: create the pro's Connect Express account if they only have a
+    // demo placeholder, then send them to Stripe-hosted onboarding. Status
+    // flips back via the account.updated webhook.
+    if (!acct.stripeAccountId.startsWith("acct_") || acct.stripeAccountId.startsWith("acct_demo")) {
+      const created = await createConnectAccount(user);
+      acct.stripeAccountId = created.accountId;
+      acct.onboardingStatus = "PENDING";
+    }
+    const base = process.env.NEXT_PUBLIC_APP_URL ?? "https://localent-ai.vercel.app";
+    const link = await createConnectAccountLink(acct.stripeAccountId, `${base}/dashboard/pro/wallet?refresh=1`, `${base}/dashboard/pro/wallet?connected=1`);
+    redirect(link.url);
+  }
+  acct.onboardingStatus = "COMPLETE"; acct.kycStatus = "VERIFIED"; acct.payoutsEnabled = true;
   redirect("/dashboard/pro/wallet?connected=1");
 }
 export async function updateSettingsAction(fd: FormData) {

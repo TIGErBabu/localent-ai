@@ -5,8 +5,9 @@ import { config } from "@/lib/config";
 import { TierBadge, Stars } from "@/components/ui";
 import { ProNav } from "@/components/DashNav";
 import { updateProfileAction, submitVerificationAction } from "@/app/actions";
+import ChangePasswordForm from "@/components/ChangePasswordForm";
 
-export default async function ProProfilePage({ searchParams }: { searchParams: Promise<{ saved?: string; verification?: string }> }) {
+export default async function ProProfilePage({ searchParams }: { searchParams: Promise<{ saved?: string; verification?: string; pw?: string }> }) {
   const user = await requireRole("PRO");
   const sp = await searchParams;
   const p = profileByUserId(user.id);
@@ -63,6 +64,8 @@ export default async function ProProfilePage({ searchParams }: { searchParams: P
           <button className="btn-trust sm:col-span-3" type="submit">Submit for verification</button>
         </form>
       </section>
+
+      <ChangePasswordForm back="/dashboard/pro/profile" pw={sp.pw} />
     </div>
   );
 }

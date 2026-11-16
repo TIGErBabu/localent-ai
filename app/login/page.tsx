@@ -1,6 +1,7 @@
 import Link from "next/link";
 import type { Metadata } from "next";
 import { loginAction } from "@/app/actions";
+import { config } from "@/lib/config";
 
 export const metadata: Metadata = { title: "Log in" };
 
@@ -24,10 +25,17 @@ export default async function LoginPage({
         <h1 className="text-2xl font-extrabold tracking-tight text-slate-900">Log in to Localent</h1>
         <p className="mt-1 text-sm text-slate-500">Welcome back — pick up your jobs, bids and payments.</p>
 
-        {sp.error && (
+        {sp.error === "demooff" && (
           <p className="mt-4 rounded-lg bg-red-50 px-4 py-3 text-sm font-semibold text-red-700" role="alert">
-            That email and password didn&apos;t match an account. Check them and try again — demo accounts use
-            the password <span className="font-mono">demo</span>.
+            Demo accounts are disabled on this deployment. Please log in with a real account.
+          </p>
+        )}
+        {sp.error && sp.error !== "demooff" && (
+          <p className="mt-4 rounded-lg bg-red-50 px-4 py-3 text-sm font-semibold text-red-700" role="alert">
+            That email and password didn&apos;t match an account. Check them and try again
+            {config.demoMode && (
+              <> — demo accounts use the password <span className="font-mono">demo</span>.</>
+            )}
           </p>
         )}
 
@@ -51,10 +59,13 @@ export default async function LoginPage({
         </p>
       </section>
 
+      {config.demoMode && (
       <section className="card p-6">
-        <h2 className="font-bold text-slate-900">Demo accounts — password: demo</h2>
+        <h2 className="font-bold text-slate-900">Demo accounts — DEMO MODE ONLY</h2>
         <p className="mt-1 text-sm text-slate-500">
-          This is a demo with fictional data. Tap any account to log in instantly — no typing needed.
+          Demo mode is ON for this deployment, so these fictional one-click logins are available
+          (password: <span className="font-mono">demo</span>). They are disabled automatically when
+          DEMO_MODE is turned off for production. Tap any account to log in instantly.
         </p>
         <div className="mt-4 grid gap-2">
           {DEMO_ACCOUNTS.map((account) => (
@@ -72,6 +83,7 @@ export default async function LoginPage({
           ))}
         </div>
       </section>
+      )}
     </div>
   );
 }

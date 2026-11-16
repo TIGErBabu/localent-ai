@@ -29,7 +29,8 @@ export interface JobPost {
   budgetMinCents: number; budgetMaxCents: number;
   locationLat: number; locationLng: number; locationLabel: string; // rounded public coords
   status: JobStatus; preferredDate: string | null; matchedProLimit: number;
-  completionCode: string | null; // demo: plaintext so the customer can read it; production stores completionCodeHash only
+  completionCode: string | null; // DEMO MODE only: plaintext so the customer can read it. Production path leaves this null.
+  completionCodeHash: string | null; // sha256 of the code — always set when a code is issued (production source of truth)
   completionRequestedAt: string | null; createdAt: string;
 }
 export interface JobPrivateDetails {

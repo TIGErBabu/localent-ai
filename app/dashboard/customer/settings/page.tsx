@@ -1,8 +1,9 @@
 import { requireRole } from "@/lib/session";
 import { CustomerNav } from "@/components/DashNav";
+import ChangePasswordForm from "@/components/ChangePasswordForm";
 import { updateSettingsAction } from "@/app/actions";
 
-export default async function CustomerSettingsPage({ searchParams }: { searchParams: Promise<{ saved?: string }> }) {
+export default async function CustomerSettingsPage({ searchParams }: { searchParams: Promise<{ saved?: string; pw?: string }> }) {
   const user = await requireRole("CUSTOMER");
   const sp = await searchParams;
   return (
@@ -16,6 +17,7 @@ export default async function CustomerSettingsPage({ searchParams }: { searchPar
         <div><label className="label" htmlFor="phone">Phone (for appointment SMS)</label><input id="phone" name="phone" className="input" defaultValue={user.phoneNumber ?? ""} /></div>
         <button className="btn-action" type="submit">Save settings</button>
       </form>
+      <ChangePasswordForm back="/dashboard/customer/settings" pw={sp.pw} />
       <section className="card mt-4 p-6 text-sm text-slate-600">
         <p className="font-bold text-slate-900">Your privacy on Localent</p>
         <p className="mt-1">Your exact address and phone number are only shared with a pro after you fund that job&apos;s deposit. Everything before that is approximate area + in-app chat with automatic contact masking.</p>

@@ -28,7 +28,7 @@ export async function POST(req: NextRequest) {
     description: String(body.description ?? ""), budgetMinCents: Number(body.budgetMinCents ?? 0), budgetMaxCents: Number(body.budgetMaxCents ?? 0),
     locationLat: roundCoord(29.6516), locationLng: roundCoord(-82.3248), locationLabel: `${config.metro} (approx.)`,
     status: "OPEN" as const, preferredDate: body.preferredDate ?? null, matchedProLimit: config.matchedProLimit,
-    completionCode: null, completionRequestedAt: null, createdAt: nowIso(),
+    completionCode: null, completionCodeHash: null, completionRequestedAt: null, createdAt: nowIso(),
   };
   db().jobPosts.push(job);
   db().jobPrivateDetails.push({ jobId, streetAddress: String(body.streetAddress), unit: body.unit ?? null, zip: String(body.zip ?? ""), accessNotes: body.accessNotes ?? null });

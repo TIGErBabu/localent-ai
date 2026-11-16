@@ -15,8 +15,12 @@ export interface Category {
 }
 
 export const config = {
-  // DEMO MODE: true until a real DATABASE_URL (Supabase Postgres) is provisioned.
-  demoMode: !process.env.DATABASE_URL,
+  // DEMO MODE: env flag DEMO_MODE, default true until Supabase lands and the
+  // company flips it off (DEMO_MODE=false). Gates the one-click demo logins and
+  // the readable completion code; real JWT auth works in both modes.
+  demoMode: process.env.DEMO_MODE ? process.env.DEMO_MODE !== "false" : true,
+  // Which DataAdapter implementation lib/store.ts serves.
+  dataAdapter: process.env.DATA_ADAPTER ?? "memory",
   metro: "Gainesville, FL",
   proCommissionBps: intEnv("PLATFORM_PRO_COMMISSION_BPS", 1000), // 10%
   customerFeeBps: intEnv("PLATFORM_CUSTOMER_FEE_BPS", 500), // 5%
