@@ -20,10 +20,12 @@ export async function getSessionUser(): Promise<User | null> {
   // hydrate failed (transient pooler refusal), the cache is the empty
   // skeleton and findUser would miss — concluding "logged out" for a valid
   // session and bouncing the user to /login (observed in production).
-  // ensureReady() retries hydration first; it is a no-op once hydrated and
-  // for the in-memory adapter, so this costs nothing on the happy path.
-  // Every session read in the app funnels through here (requireUser,
-  // requireRole, Header, API routes), so this one call covers all renders.
+  // ensureReady() retries a failed hydration and re-hydrates once the
+  // snapshot is older than the adapter's freshness TTL, so this gate is
+  // also what keeps every page load and server action (all of which funnel
+  // through here: requireUser, requireRole, Header, API routes) from
+  // acting on a frozen cross-instance snapshot. For the in-memory adapter
+  // it is a no-op.
   await adapter.ensureReady();
   return findUser(claims.sub) ?? null;
 }

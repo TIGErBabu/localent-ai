@@ -50,6 +50,7 @@ export default async function CustomerPayPage({ params, searchParams }: { params
               {m.status === "UNFUNDED" ? (
                 <form action={fundMilestoneAction} className="mt-4 space-y-3">
                   <input type="hidden" name="milestoneId" value={m.id} />
+                  <input type="hidden" name="jobId" value={job.id} />
                   <div className="grid gap-3 sm:grid-cols-2">
                     <input className="input" defaultValue="4242 4242 4242 4242" aria-label="Test card number" readOnly />
                     <div className="grid grid-cols-2 gap-3"><input className="input" defaultValue="12 / 34" aria-label="Expiry" readOnly /><input className="input" defaultValue="424" aria-label="CVC" readOnly /></div>

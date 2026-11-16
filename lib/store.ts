@@ -18,7 +18,11 @@ export interface DataAdapter {
   // Guarantee the cache actually reflects the backing store before a
   // read-critical path trusts data(). The Prisma adapter retries hydration
   // if the boot-time attempt failed (a failed hydrate otherwise leaves the
-  // instance serving an empty store for its whole lifetime); the in-memory
+  // instance serving an empty store for its whole lifetime) and re-hydrates
+  // when its snapshot is older than a short TTL, so a warm serverless
+  // instance neither serves frozen state nor swallows actions for rows
+  // created after it booted (the refresh is skipped while the cache holds
+  // unflushed mutations — see lib/prisma-adapter.ts). The in-memory
   // adapter is seeded synchronously at construction, so this is a no-op.
   ensureReady(): Promise<void>;
 }

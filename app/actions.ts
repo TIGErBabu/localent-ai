@@ -163,8 +163,20 @@ export async function fundMilestoneAction(fd: FormData) {
   const user = await me();
   const ms = db().paymentMilestones.find((m) => m.id === s(fd, "milestoneId"));
   const job = ms ? findJob(ms.jobId) : undefined;
-  if (!ms || !job || !isJobCustomer(user, job) || ms.status !== "UNFUNDED") redirect("/dashboard/customer");
-  const bid = db().bids.find((b) => b.id === ms.bidId)!;
+  const bid = ms ? db().bids.find((b) => b.id === ms.bidId) : undefined;
+  if (!ms || !job || !bid) {
+    // Lookup miss AFTER the freshness gate in me() (getSessionUser →
+    // ensureReady re-hydrates stale instances): the milestone/job/bid is
+    // genuinely not in the store. Fail LOUD on the pay page, whose red
+    // banner states the milestone was not funded. The old behaviour —
+    // a silent redirect to the dashboard — is how two real "Pay $147 into
+    // escrow" clicks vanished in production with no PaymentIntent and no
+    // error: the POST had landed on a pre-acceptance instance whose
+    // frozen cache held no milestone row to find.
+    const jobId = s(fd, "jobId") || ms?.jobId;
+    redirect(jobId ? `/dashboard/customer/jobs/${jobId}/pay?error=payment` : "/dashboard/customer");
+  }
+  if (!isJobCustomer(user, job) || ms.status !== "UNFUNDED") redirect("/dashboard/customer");
   const feeShare = Math.round((bid.customerFeeCents * ms.amountCents) / bid.totalAmountCents);
   const commissionShare = Math.round((bid.proCommissionCents * ms.amountCents) / bid.totalAmountCents);
   const charge = await chargeToEscrow(job.id, ms.amountCents + feeShare, { milestoneId: ms.id }).catch((e) => {
@@ -334,7 +346,14 @@ export async function requestCompletionAction(fd: FormData) {
 export async function confirmCompletionAction(fd: FormData) {
   const user = await me();
   const job = findJob(s(fd, "jobId"));
-  if (!job || !isJobCustomer(user, job)) redirect("/dashboard/customer");
+  if (!job) {
+    // Same silent-miss pattern as fundMilestoneAction: confirming
+    // completion releases escrow, so a lookup miss after the freshness
+    // gate must be loud (the job page renders the ?error=confirm banner),
+    // never a silent bounce to the dashboard.
+    redirect(`/dashboard/customer/jobs/${s(fd, "jobId")}?error=confirm`);
+  }
+  if (!isJobCustomer(user, job)) redirect("/dashboard/customer");
   const ms2 = milestonesForJob(job.id).find((m) => m.seq === 2);
   if (ms2 && ms2.status === "UNFUNDED") redirect(`/dashboard/customer/jobs/${job.id}/pay?next=complete`);
   for (const ms of milestonesForJob(job.id)) await releaseMilestone(ms.id, user);

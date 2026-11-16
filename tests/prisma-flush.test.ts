@@ -9,12 +9,15 @@
 // instance flushed — including a bare login/logout (lib/auth.ts flushes on
 // session issuance/revocation).
 //
-// Two parts:
+// Three parts:
 //  1. Unit tests of the pure diff (computeStoreDiff).
 //  2. A two-instance scenario over a shared fake Prisma client: instance A
 //     hydrates before acceptance; instance B accepts + funds + schedules
 //     and flushes; instance A then flushes an unrelated session mutation.
 //     B's state must survive A's flush untouched.
+//  3. Freshness: ensureReady() re-hydrates after the TTL so an instance
+//     sees rows created after it booted (the stale-snapshot action
+//     swallow), while never erasing unflushed mutations.
 
 import { PrismaDataAdapter } from "../lib/prisma-adapter";
 import {
@@ -379,9 +382,106 @@ async function scenarioTests() {
   await b.disconnect();
 }
 
+// ─── Part 3: cross-instance freshness (ensureReady TTL re-hydration) ─────────
+// Guards the second production failure of the per-instance cache: an
+// instance hydrated ONCE and never refreshed, so actions landing on it
+// looked up rows created after it booted (milestones created by bid
+// acceptance on another instance), missed, and silently no-oped — the
+// pro's check-in clicks recorded nothing and two "Pay $147" clicks created
+// no PaymentIntent and no error. ensureReady() must re-hydrate once the
+// snapshot is older than the TTL — but never at the cost of unflushed
+// mutations, which a wholesale cache replacement would erase.
+
+function milestoneRow(id: string, seq: number): Row {
+  return {
+    id, jobId: "j1", bidId: "b1", seq,
+    label: seq === 1 ? "Deposit & materials" : "Balance on completion",
+    amountCents: seq === 1 ? 6000 : 14000, status: "UNFUNDED",
+    paymentIntentId: null, transferId: null, createdAt: T0,
+  };
+}
+
+async function freshnessTests() {
+  console.log("cross-instance freshness (ensureReady TTL refresh):");
+  const fake = new FakePrisma();
+  seedFakeDb(fake);
+  const factory = async () => fake.asClient();
+
+  // Instance C hydrates with the default TTL.
+  const c = new PrismaDataAdapter(factory);
+  await c.ready;
+  check("C hydrated the seeded job", c.data().jobPosts.length === 1);
+
+  // Another instance's flush lands a milestone in the DB AFTER C booted
+  // (seeded directly — exactly what C's next hydrate would read).
+  fake.seed("paymentMilestone", "id", milestoneRow("ms-late", 1));
+  check(
+    "C's snapshot is stale: the late milestone is invisible",
+    !c.data().paymentMilestones.some((m) => m.id === "ms-late"),
+  );
+
+  await c.ensureReady();
+  check(
+    "ensureReady within the TTL does not refresh",
+    !c.data().paymentMilestones.some((m) => m.id === "ms-late"),
+  );
+
+  // Simulate TTL expiry by backdating the last-hydrate stamp (no sleeping).
+  (c as unknown as { lastHydratedAt: number }).lastHydratedAt = 0;
+  await c.ensureReady();
+  check(
+    "ensureReady after TTL expiry re-hydrates: late milestone visible",
+    c.data().paymentMilestones.some((m) => m.id === "ms-late"),
+  );
+
+  // Dirty-cache guard: an unflushed mutation must survive ensureReady —
+  // a refresh here would erase it (this is the flush() call path).
+  c.data().refreshTokens.push({
+    id: "rt-c", userId: "u-cust", tokenHash: "hash-c",
+    expiresAt: "2026-12-16T10:00:00.000Z", revokedAt: null, createdAt: ISO,
+  });
+  fake.seed("paymentMilestone", "id", milestoneRow("ms-later", 2));
+  (c as unknown as { lastHydratedAt: number }).lastHydratedAt = 0;
+  await c.ensureReady();
+  check(
+    "refresh skipped while cache is dirty: unflushed mutation kept",
+    c.data().refreshTokens.some((t) => t.id === "rt-c"),
+  );
+  check(
+    "refresh skipped while cache is dirty: newest row not yet visible",
+    !c.data().paymentMilestones.some((m) => m.id === "ms-later"),
+  );
+  await c.flush();
+  check(
+    "flush persisted the mutation the refresh preserved",
+    fake.get("refreshToken", "rt-c")?.tokenHash === "hash-c",
+  );
+  (c as unknown as { lastHydratedAt: number }).lastHydratedAt = 0;
+  await c.ensureReady();
+  check(
+    "after the flush, refresh resumes: newest row visible, flushed row kept",
+    c.data().paymentMilestones.some((m) => m.id === "ms-later") &&
+      c.data().refreshTokens.some((t) => t.id === "rt-c"),
+  );
+
+  // TTL injection: an instance with TTL 0 refreshes on every ensureReady.
+  const e = new PrismaDataAdapter(factory, 0);
+  await e.ready;
+  fake.seed("paymentMilestone", "id", milestoneRow("ms-zero", 1));
+  await e.ensureReady();
+  check(
+    "TTL 0 instance refreshes on every ensureReady",
+    e.data().paymentMilestones.some((m) => m.id === "ms-zero"),
+  );
+
+  await c.disconnect();
+  await e.disconnect();
+}
+
 async function main() {
   diffTests();
   await scenarioTests();
+  await freshnessTests();
   if (failures > 0) {
     console.error(`\n${failures} check(s) FAILED`);
     process.exit(1);

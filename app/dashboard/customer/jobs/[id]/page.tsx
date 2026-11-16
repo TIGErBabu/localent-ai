@@ -9,9 +9,10 @@ import { CustomerNav } from "@/components/DashNav";
 import Chat from "@/components/Chat";
 import { decideChangeOrderAction, confirmCompletionAction, openDisputeAction } from "@/app/actions";
 
-export default async function CustomerJobPage({ params }: { params: Promise<{ id: string }> }) {
+export default async function CustomerJobPage({ params, searchParams }: { params: Promise<{ id: string }>; searchParams: Promise<{ error?: string }> }) {
   const user = await requireRole("CUSTOMER");
   const { id } = await params;
+  const sp = await searchParams;
   const job = findJob(id);
   if (!job || job.customerId !== user.id) notFound();
   const bid = acceptedBid(job.id);
@@ -35,6 +36,7 @@ export default async function CustomerJobPage({ params }: { params: Promise<{ id
         </div>
         <StatusPill status={job.status} />
       </div>
+      {sp.error === "confirm" && <p className="mt-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm font-medium text-red-800">We couldn&rsquo;t load this job to confirm completion, so <strong>nothing was released</strong>. Please reload the page and try again.</p>}
       <p className="card mt-4 p-5 text-slate-700">{job.description}</p>
 
       <div className="mt-4 flex flex-wrap gap-2">

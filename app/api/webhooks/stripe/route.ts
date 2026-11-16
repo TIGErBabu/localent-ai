@@ -26,6 +26,13 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Webhook signature verification failed." }, { status: 400 });
   }
 
+  // Webhooks carry no session, so the getSessionUser() freshness gate never
+  // runs for them. Refresh explicitly: on a warm instance whose cache
+  // predates the milestone, the lookups below would miss, `mutated` would
+  // stay false, and the event would be acked (200) without ever being
+  // applied — a silently swallowed payment confirmation.
+  await adapter.ensureReady();
+
   let mutated = false;
   switch (event.type) {
     case "payment_intent.succeeded": {

@@ -8,6 +8,10 @@ import { config } from "@/lib/config";
 // GET /api/jobs?category=plumbing — OPEN jobs are public in approximate form;
 // anything else requires a session and passes the resource policy (blueprint 4.3).
 export async function GET(req: NextRequest) {
+  // Anonymous requests return from getSessionUser() before its freshness
+  // gate runs, so gate here: the public job list must not serve a frozen
+  // snapshot from a long-lived instance either.
+  await adapter.ensureReady();
   const user = await getSessionUser();
   const category = req.nextUrl.searchParams.get("category");
   const jobs = db().jobPosts.filter((j) => !category || j.category === category);

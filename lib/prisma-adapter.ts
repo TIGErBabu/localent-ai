@@ -30,6 +30,26 @@
 // `hydratedOk` records which of the two it was, and ensureReady() retries
 // hydration on demand when it failed.
 //
+// FRESHNESS: hydration is NOT one-shot. Each serverless instance is a
+// separate process with its own cache, and an instance that hydrated once
+// and never refreshed would serve that frozen snapshot for its whole
+// lifetime — page loads flickering between old and current state, and
+// server actions silently no-oping when their POST landed on an instance
+// born before the target row existed (in production: pro check-in clicks
+// recorded nothing, and two "Pay $147 into escrow" clicks created no
+// PaymentIntent and no error because the milestone lookup missed in the
+// stale cache). ensureReady() — awaited at every request boundary via
+// getSessionUser(), the auth actions, and the Stripe webhook — therefore
+// RE-hydrates whenever the last successful hydrate is older than
+// HYDRATE_TTL_MS (~3s). One guard keeps that safe against the diff-flush:
+// a refresh replaces cache + snapshot wholesale, so it is skipped while
+// the cache holds unflushed mutations (flush() itself calls ensureReady()
+// after the caller mutated, on its way to persisting — refreshing there
+// would erase the very writes being flushed). At request boundaries the
+// cache holds no unflushed state (every mutating caller flushes
+// immediately), so the refresh is what requests actually see. Concurrent
+// ensureReady() calls on one instance share a single in-flight hydration.
+//
 // KNOWN LIMITATIONS:
 //  • Mutations made through data() (push / in-place edits, exactly how the
 //    demo adapter is used) live only in the cache until flush() is called.
@@ -47,10 +67,11 @@
 //    and re-created the instance's whole cache, so a login-triggered flush
 //    from a pre-acceptance instance resurrected OPEN/PENDING job/bid state
 //    and wiped the schedule and check-in evidence in production. The one
-//    remaining hazard is inherent to the cache architecture: if an
-//    instance mutates a row based on stale contents, its version of THAT
-//    row wins — the blast radius is now the rows actually touched, not
-//    the whole database. Ids are written back with an identity map: rows
+//    remaining hazard is inherent to the cache architecture: within the
+//    freshness TTL (or while a refresh is deferred by unflushed changes),
+//    an instance can still mutate a row based on slightly stale contents,
+//    and its version of THAT row wins — the blast radius is the rows
+//    actually touched, not the whole database. Ids are written back with an identity map: rows
 //    hydrated from the DB already carry UUID ids, and rows created at
 //    runtime carry UUID ids too (lib/utils.ts uid() returns
 //    crypto.randomUUID()).
@@ -85,6 +106,14 @@ function deepCopyStore(data: StoreData): StoreData {
 }
 
 export class PrismaDataAdapter implements DataAdapter {
+  /**
+   * How old the last successful hydrate may be before ensureReady()
+   * re-hydrates. Short on purpose: it only needs to bridge the gap between
+   * one request creating a row (on any instance) and the next request —
+   * possibly on a different, older instance — needing to see it.
+   */
+  static readonly HYDRATE_TTL_MS = 3000;
+
   private cache: StoreData = emptyStoreData();
   // Deep snapshot of the cache as hydrate() loaded it (later: as the last
   // successful flush() wrote it). flush() diffs the live cache against
@@ -94,21 +123,36 @@ export class PrismaDataAdapter implements DataAdapter {
   private client: PrismaClientLike | null = null;
   // Injectable for tests; production uses the real client factory.
   private readonly clientFactory: () => Promise<PrismaClientLike>;
+  // Injectable for tests (0 = refresh on every ensureReady()).
+  private readonly hydrateTtlMs: number;
   // True only once a hydrate() has run to completion. Tracked separately
   // from `client`: a client can exist while its first queries timed out
   // (observed in production — pool timeout during the parallel hydrate),
   // and keying recovery off client presence alone left such an instance
   // serving the empty skeleton for its whole lifetime.
   private hydratedOk = false;
+  // Epoch ms of the last SUCCESSFUL hydrate; 0 = never. Drives the
+  // ensureReady() freshness check. Deliberately NOT advanced by flush():
+  // a flush proves the cache matches the DB only for the rows this
+  // instance knows about — rows other instances created stay invisible
+  // until a real re-hydrate, and letting flushes reset the clock would
+  // keep a busy instance stale indefinitely.
+  private lastHydratedAt = 0;
+  // Single in-flight hydration promise: concurrent ensureReady() calls
+  // (parallel requests on one warm instance) share one refresh instead of
+  // stampeding the pooler with one hydrate per request.
+  private hydrateInFlight: Promise<void> | null = null;
 
   /** Resolves once the initial hydrate() attempt has finished. */
   readonly ready: Promise<void>;
 
   constructor(
     clientFactory: () => Promise<PrismaClientLike> = createPrismaClient,
+    hydrateTtlMs: number = PrismaDataAdapter.HYDRATE_TTL_MS,
   ) {
     this.clientFactory = clientFactory;
-    this.ready = this.hydrate();
+    this.hydrateTtlMs = hydrateTtlMs;
+    this.ready = this.runHydrate();
   }
 
   /** Synchronous cache access — the DataAdapter contract. */
@@ -117,16 +161,49 @@ export class PrismaDataAdapter implements DataAdapter {
   }
 
   /**
-   * Retry hydration if it has never succeeded. Read-critical paths (login,
-   * registration) await this before trusting data(), so one bad boot-time
-   * hydrate — e.g. a transient pool timeout — no longer poisons the
-   * instance permanently.
+   * Run hydrate() with a single in-flight promise: if a hydration is
+   * already running on this instance, return that promise instead of
+   * starting a second one.
+   */
+  private runHydrate(): Promise<void> {
+    if (!this.hydrateInFlight) {
+      this.hydrateInFlight = this.hydrate().finally(() => {
+        this.hydrateInFlight = null;
+      });
+    }
+    return this.hydrateInFlight;
+  }
+
+  /** True while the cache holds mutations flush() has not persisted yet. */
+  private hasUnflushedChanges(): boolean {
+    const diff = computeStoreDiff(this.snapshot, this.cache);
+    return Object.values(diff).some(
+      (t) => t.upserts.length > 0 || t.deleteIds.length > 0,
+    );
+  }
+
+  /**
+   * Make the cache trustworthy before a read-critical path uses data():
+   *  • if hydration has never succeeded, retry it — one bad boot-time
+   *    hydrate (e.g. a transient pool timeout) must not poison the
+   *    instance permanently;
+   *  • if the last successful hydrate is older than the TTL, re-hydrate,
+   *    so this instance sees rows other instances wrote after it booted —
+   *    UNLESS the cache holds unflushed mutations. A refresh replaces
+   *    cache + snapshot wholesale and would erase those writes; flush()
+   *    calls ensureReady() after mutations on its way to persisting them,
+   *    so with a dirty cache the refresh is skipped and the next request
+   *    boundary (post-flush, clean cache) refreshes instead.
    */
   async ensureReady(): Promise<void> {
     await this.ready;
     if (!this.hydratedOk) {
-      await this.hydrate();
+      await this.runHydrate();
+      return;
     }
+    if (Date.now() - this.lastHydratedAt < this.hydrateTtlMs) return;
+    if (this.hasUnflushedChanges()) return;
+    await this.runHydrate();
   }
 
   /**
@@ -196,6 +273,7 @@ export class PrismaDataAdapter implements DataAdapter {
       this.snapshot = deepCopyStore(this.cache);
       this.client = client;
       this.hydratedOk = true;
+      this.lastHydratedAt = Date.now();
       return null;
     } catch (err) {
       // Disconnect the failed attempt's client so its pool doesn't linger
@@ -229,7 +307,10 @@ export class PrismaDataAdapter implements DataAdapter {
     // flush() is also a recovery path: ensureReady() retries hydration when
     // it never succeeded (the old condition keyed off `client === null`,
     // which missed the case where the client exists but its hydrate queries
-    // timed out).
+    // timed out). Its TTL refresh cannot hurt here: by the time flush()
+    // runs, the caller has already mutated the cache, and ensureReady()
+    // skips the refresh while unflushed changes exist — so the writes this
+    // flush is about to persist are never wiped by a re-hydrate.
     await this.ensureReady();
     if (!this.client) {
       throw new Error(
@@ -274,6 +355,7 @@ export class PrismaDataAdapter implements DataAdapter {
       await this.client.$disconnect();
       this.client = null;
       this.hydratedOk = false;
+      this.lastHydratedAt = 0;
       this.snapshot = emptyStoreData();
     }
   }
