@@ -18,8 +18,16 @@ class InMemoryAdapter implements DataAdapter {
   data(): StoreData { return this.store; }
 }
 
+// Adapter selection is env-driven: DATA_ADAPTER=memory (default) serves the
+// seeded in-memory store; DATA_ADAPTER=prisma serves lib/prisma-adapter.ts
+// (hydrates from Postgres once DATABASE_URL + `prisma generate` exist).
+import { PrismaDataAdapter } from "./prisma-adapter";
+function createAdapter(): DataAdapter {
+  return config.dataAdapter === "prisma" ? new PrismaDataAdapter() : new InMemoryAdapter();
+}
+
 const g = globalThis as unknown as { __localentAdapter?: DataAdapter };
-if (!g.__localentAdapter) g.__localentAdapter = new InMemoryAdapter();
+if (!g.__localentAdapter) g.__localentAdapter = createAdapter();
 export const adapter: DataAdapter = g.__localentAdapter;
 export function db(): StoreData { return adapter.data(); }
 
