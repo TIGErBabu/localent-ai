@@ -214,18 +214,41 @@ export async function fundMilestoneAction(fd: FormData) {
   await persist();
   redirect(`/dashboard/customer/jobs/${job.id}`);
 }
-async function releaseMilestone(msId: string, actor: User) {
+// Releases ONE held milestone to the pro. Returns true when the milestone
+// is RELEASED (or was not HELD to begin with — nothing owed), false when
+// the Stripe transfer itself failed. Two crash-safety rules live here:
+//  1. A Stripe failure (e.g. balance_insufficient while the platform's
+//     charges are still clearing) is caught and logged, NEVER thrown —
+//     an unhandled StripeInvalidRequestError used to 500 the whole
+//     confirm-completion POST. The milestone stays HELD and the caller
+//     decides how to surface the failure; the customer/admin can retry.
+//  2. On success the RELEASED state is persisted IMMEDIATELY, before the
+//     caller attempts the next milestone. Without this, a later
+//     milestone's failed transfer would abort the action before any
+//     flush, leaving an already-paid milestone reading HELD in the DB —
+//     and a retry would transfer it a second time. The HELD-only guard
+//     above only protects against double payment if the RELEASED state
+//     actually reached the DB.
+async function releaseMilestone(msId: string, actor: User): Promise<boolean> {
   const ms = db().paymentMilestones.find((m) => m.id === msId);
-  if (!ms || ms.status !== "HELD") return;
+  if (!ms || ms.status !== "HELD") return true;
   const job = findJob(ms.jobId)!;
   const bid = db().bids.find((b) => b.id === ms.bidId)!;
   const acct = db().proPayoutAccounts.find((a) => a.userId === bid.proId);
-  const t = await transferToPro(acct?.stripeAccountId ?? (config.demoMode ? "acct_demo" : `acct_pending_${bid.proId}`), ms.amountCents - Math.round((bid.proCommissionCents * ms.amountCents) / bid.totalAmountCents), { jobId: job.id, milestoneId: ms.id });
+  let t: Awaited<ReturnType<typeof transferToPro>>;
+  try {
+    t = await transferToPro(acct?.stripeAccountId ?? (config.demoMode ? "acct_demo" : `acct_pending_${bid.proId}`), ms.amountCents - Math.round((bid.proCommissionCents * ms.amountCents) / bid.totalAmountCents), { jobId: job.id, milestoneId: ms.id });
+  } catch (e) {
+    console.error("[localent] transferToPro failed", e);
+    return false;
+  }
   ms.status = "RELEASED"; ms.transferId = t.transferId;
   const pay = db().payments.find((p) => p.milestoneId === ms.id);
   if (pay) { pay.status = "RELEASED"; pay.transferId = t.transferId; }
   notify(bid.proId, "PAYOUT", `${money(ms.amountCents)} escrow released for “${job.title}” (milestone ${ms.seq}). Net of commission is on its way to your bank.`, job.id);
+  await persist();
   void actor;
+  return true;
 }
 async function refundMilestone(msId: string) {
   const ms = db().paymentMilestones.find((m) => m.id === msId);
@@ -356,7 +379,20 @@ export async function confirmCompletionAction(fd: FormData) {
   if (!isJobCustomer(user, job)) redirect("/dashboard/customer");
   const ms2 = milestonesForJob(job.id).find((m) => m.seq === 2);
   if (ms2 && ms2.status === "UNFUNDED") redirect(`/dashboard/customer/jobs/${job.id}/pay?next=complete`);
-  for (const ms of milestonesForJob(job.id)) await releaseMilestone(ms.id, user);
+  // Release each milestone; releaseMilestone persists every success
+  // immediately and reports Stripe failures instead of throwing. If any
+  // milestone is still HELD afterwards, the job is NOT completed —
+  // completion stays requested, the job page shows the truthful
+  // per-milestone state under the ?error=release banner, and the
+  // customer can retry (already-RELEASED milestones are skipped).
+  let allReleased = true;
+  for (const ms of milestonesForJob(job.id)) {
+    if (!(await releaseMilestone(ms.id, user))) allReleased = false;
+  }
+  if (!allReleased) {
+    await persist();
+    redirect(`/dashboard/customer/jobs/${job.id}?error=release`);
+  }
   job.status = "COMPLETED";
   const appt = db().appointments.find((a) => a.jobId === job.id);
   if (appt) appt.status = "DONE";
@@ -485,7 +521,19 @@ export async function adminResolveDisputeAction(fd: FormData) {
   if (!d || !job || d.status !== "OPEN") redirect("/admin/disputes");
   const release = s(fd, "decision") === "release";
   if (release) {
-    for (const ms of milestonesForJob(job.id)) await releaseMilestone(ms.id, admin);
+    // Same crash-safety contract as confirmCompletionAction: a failed
+    // Stripe transfer leaves that milestone HELD (successes are already
+    // persisted by releaseMilestone), so the dispute must stay OPEN and
+    // the job must not be marked COMPLETED — the admin can retry from
+    // this page, which shows the real per-milestone state.
+    let allReleased = true;
+    for (const ms of milestonesForJob(job.id)) {
+      if (!(await releaseMilestone(ms.id, admin))) allReleased = false;
+    }
+    if (!allReleased) {
+      await persist();
+      redirect("/admin/disputes");
+    }
     job.status = "COMPLETED";
     d.status = "RESOLVED_RELEASE";
     audit(admin, "RESOLVE_DISPUTE_RELEASE", "DISPUTE", d.id, "Held escrow released to pro.");

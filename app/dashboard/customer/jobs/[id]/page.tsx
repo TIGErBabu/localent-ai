@@ -37,6 +37,7 @@ export default async function CustomerJobPage({ params, searchParams }: { params
         <StatusPill status={job.status} />
       </div>
       {sp.error === "confirm" && <p className="mt-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm font-medium text-red-800">We couldn&rsquo;t load this job to confirm completion, so <strong>nothing was released</strong>. Please reload the page and try again.</p>}
+      {sp.error === "release" && <p className="mt-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm font-medium text-red-800">The release couldn&rsquo;t be completed — any milestone still shown as <strong>HELD</strong> below is still in escrow. This can happen while payments are still clearing. Check the milestone statuses below and try confirming again.</p>}
       <p className="card mt-4 p-5 text-slate-700">{job.description}</p>
 
       <div className="mt-4 flex flex-wrap gap-2">
