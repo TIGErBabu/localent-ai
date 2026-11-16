@@ -186,11 +186,17 @@ export async function fundMilestoneAction(fd: FormData) {
   db().payments.push({ id: uid("pay"), jobId: job.id, milestoneId: ms.id, paymentIntentId: charge.paymentIntentId, transferId: null, grossCents: ms.amountCents + feeShare, customerFeeCents: feeShare, commissionCents: commissionShare, netCents: ms.amountCents - commissionShare, status: "HELD", createdAt: nowIso() });
   if (ms.seq === 1 && !job.completionCodeHash) {
     // Completion code issued to the customer at funding. The sha256 hash is
-    // ALWAYS stored; the readable code is kept only in DEMO_MODE — production
-    // stores the hash only and shows the code once at funding time.
+    // ALWAYS stored and is the verification source of truth. The readable
+    // code is kept on the job only in DEMO_MODE (shown on the customer's job
+    // page); in production there is no plaintext column, so the code is
+    // delivered to the customer in a persistent in-app notification instead,
+    // which they can re-read on their dashboard at any time.
     const code = completionCode();
     job.completionCodeHash = sha256Hex(code);
     job.completionCode = config.demoMode ? code : null;
+    if (!config.demoMode) {
+      notify(job.customerId, "SYSTEM", `Your completion code for “${job.title}” is ${code}. Give it to your pro only when the work is fully done — it releases your escrow.`, job.id);
+    }
   }
   notify(bid.proId, "SYSTEM", `Deposit funded and held in escrow for “${job.title}”. The exact address is now visible to you.`, job.id);
   await persist();
