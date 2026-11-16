@@ -90,7 +90,11 @@ export async function chargeToEscrow(jobId: string, amountCents: number, opts?: 
   const pi = await stripe.paymentIntents.create({
     amount: amountCents,
     currency: "usd",
-    automatic_payment_methods: { enabled: true },
+    // allow_redirects "never": this server-side confirmation flow has no
+    // browser to send anywhere, so redirect-based payment methods are off
+    // (Stripe's own instruction when a PI confirm fails over return_url —
+    // the return_url on the confirm call below is the belt-and-braces half).
+    automatic_payment_methods: { enabled: true, allow_redirects: "never" },
     transfer_group: `job:${jobId}`,
     metadata: { jobId, milestoneId: opts?.milestoneId ?? "" },
     description: `Localent escrow funding for job ${jobId}`,
@@ -99,7 +103,14 @@ export async function chargeToEscrow(jobId: string, amountCents: number, opts?: 
     // Test mode: confirm server-side with Stripe's test payment method so the
     // one-click test checkout is HONEST — the PI really reaches "succeeded"
     // (or this throws / returns a non-succeeded status and nothing is held).
-    const confirmed = await stripe.paymentIntents.confirm(pi.id, { payment_method: "pm_card_visa" });
+    // return_url is REQUIRED at confirmation (Stripe emailed the account
+    // owner about failures without it): send the customer back to this job's
+    // pay page. Base mirrors connectPayoutsAction in app/actions.ts.
+    const base = process.env.NEXT_PUBLIC_APP_URL ?? "https://localent-ai.vercel.app";
+    const confirmed = await stripe.paymentIntents.confirm(pi.id, {
+      payment_method: "pm_card_visa",
+      return_url: `${base}/dashboard/customer/jobs/${jobId}/pay`,
+    });
     return { mode: "live", paymentIntentId: pi.id, clientSecret: pi.client_secret, status: confirmed.status, note: `Test-mode PaymentIntent confirmed with pm_card_visa; Stripe status: ${confirmed.status}.` };
   }
   // Live key: do NOT auto-confirm with any payment method and do NOT let the
