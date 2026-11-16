@@ -36,14 +36,24 @@
 //    Nothing is written back automatically; mutating callers `await
 //    adapter.flush()` when they are done (wired in app/actions.ts, the
 //    mutating API routes, the Stripe webhook, and lib/auth.ts sessions).
-//  • flush() is a full rewrite, not a diff: it deleteMany's every table in
-//    reverse-FK order and re-creates every cached row in FK order (via
-//    createMany). That keeps the logic trivially correct for this app's
-//    scale, but it is NOT transactional across models and assumes a single
-//    writer process — concurrent processes flushing will last-writer-win.
-//    Ids are written back with an identity map: rows hydrated from the DB
-//    already carry UUID ids, and rows created at runtime carry UUID ids too
-//    (lib/utils.ts uid() returns crypto.randomUUID()).
+//  • flush() is a SNAPSHOT DIFF, never a full rewrite: hydrate() keeps a
+//    deep snapshot of the store it loaded, and flush() upserts only rows
+//    that are new or changed relative to that snapshot and deletes only
+//    rows this instance itself removed (see computeStoreDiff in
+//    lib/prisma-mapping.ts), all inside one $transaction. A warm instance
+//    holding a stale snapshot therefore cannot revert rows it never
+//    touched or delete rows created after it hydrated — the failure mode
+//    of the previous full-rewrite flush, which deleteMany'd all 19 tables
+//    and re-created the instance's whole cache, so a login-triggered flush
+//    from a pre-acceptance instance resurrected OPEN/PENDING job/bid state
+//    and wiped the schedule and check-in evidence in production. The one
+//    remaining hazard is inherent to the cache architecture: if an
+//    instance mutates a row based on stale contents, its version of THAT
+//    row wins — the blast radius is now the rows actually touched, not
+//    the whole database. Ids are written back with an identity map: rows
+//    hydrated from the DB already carry UUID ids, and rows created at
+//    runtime carry UUID ids too (lib/utils.ts uid() returns
+//    crypto.randomUUID()).
 //  • JobPost.completionCode (demo-only plaintext) is never persisted — only
 //    completionCodeHash reaches the database, and hydrated jobs always read
 //    completionCode: null. See lib/prisma-mapping.ts.
@@ -55,20 +65,35 @@
 import type { StoreData } from "./types";
 import type { DataAdapter } from "./store";
 import {
+  computeStoreDiff,
   createPrismaClient,
   DELEGATE_BY_KEY,
   DELETE_ORDER,
   emptyStoreData,
   MODEL_ORDER,
+  rowIdField,
   rowsToStoreData,
-  storeToPrismaPayloads,
   type PrismaClientLike,
   type StoreKey,
 } from "./prisma-mapping";
 
+/** Deep copy of a StoreData (plain JSON-shaped data; Dates never appear). */
+function deepCopyStore(data: StoreData): StoreData {
+  return typeof structuredClone === "function"
+    ? structuredClone(data)
+    : (JSON.parse(JSON.stringify(data)) as StoreData);
+}
+
 export class PrismaDataAdapter implements DataAdapter {
   private cache: StoreData = emptyStoreData();
+  // Deep snapshot of the cache as hydrate() loaded it (later: as the last
+  // successful flush() wrote it). flush() diffs the live cache against
+  // this snapshot and writes only the difference, so rows this instance
+  // never touched are never rewritten.
+  private snapshot: StoreData = emptyStoreData();
   private client: PrismaClientLike | null = null;
+  // Injectable for tests; production uses the real client factory.
+  private readonly clientFactory: () => Promise<PrismaClientLike>;
   // True only once a hydrate() has run to completion. Tracked separately
   // from `client`: a client can exist while its first queries timed out
   // (observed in production — pool timeout during the parallel hydrate),
@@ -79,7 +104,10 @@ export class PrismaDataAdapter implements DataAdapter {
   /** Resolves once the initial hydrate() attempt has finished. */
   readonly ready: Promise<void>;
 
-  constructor() {
+  constructor(
+    clientFactory: () => Promise<PrismaClientLike> = createPrismaClient,
+  ) {
+    this.clientFactory = clientFactory;
     this.ready = this.hydrate();
   }
 
@@ -145,7 +173,7 @@ export class PrismaDataAdapter implements DataAdapter {
   private async hydrateOnce(): Promise<unknown> {
     let client: PrismaClientLike | null = null;
     try {
-      client = await createPrismaClient();
+      client = await this.clientFactory();
       // Limited concurrency: firing all 19 findMany calls at once can
       // exhaust the Supabase pooler's small connection limit and time out
       // fetching a connection (observed in production logs), so hydrate in
@@ -164,6 +192,8 @@ export class PrismaDataAdapter implements DataAdapter {
         for (const [key, modelRows] of entries) rows[key] = modelRows;
       }
       this.cache = rowsToStoreData(rows);
+      // The diff baseline for future flushes: exactly what was loaded.
+      this.snapshot = deepCopyStore(this.cache);
       this.client = client;
       this.hydratedOk = true;
       return null;
@@ -184,11 +214,16 @@ export class PrismaDataAdapter implements DataAdapter {
   }
 
   /**
-   * Write the whole cache back to Postgres: deleteMany every model in
-   * reverse-FK order (children first, so no FK violations), then createMany
-   * every cached row in FK order. Ids go through an identity map — the DB
-   * already stores UUIDs. Throws if the adapter never connected, so a lost
-   * write is loud instead of silent.
+   * Persist this instance's changes to Postgres as a snapshot diff: diff
+   * the live cache against the snapshot taken at hydrate() (or at the last
+   * successful flush), then in ONE $transaction delete the rows this
+   * instance removed (children first, reverse-FK order) and upsert the
+   * rows it created or changed (FK order). Rows absent from both the
+   * snapshot and the diff — including everything other instances wrote
+   * after this one hydrated — are never touched. On success the snapshot
+   * advances to the current cache; on failure it stays put, so a retry
+   * re-attempts the same diff. Throws if the adapter never connected, so
+   * a lost write is loud instead of silent.
    */
   async flush(): Promise<void> {
     // flush() is also a recovery path: ensureReady() retries hydration when
@@ -202,16 +237,34 @@ export class PrismaDataAdapter implements DataAdapter {
       );
     }
     const client = this.client;
-    const payloads = storeToPrismaPayloads(this.cache, (id) => id);
+    const diff = computeStoreDiff(this.snapshot, this.cache);
+    const ops: PromiseLike<unknown>[] = [];
     for (const key of DELETE_ORDER) {
-      await client[DELEGATE_BY_KEY[key]].deleteMany();
+      const { deleteIds } = diff[key];
+      if (deleteIds.length === 0) continue;
+      const field = rowIdField(key);
+      ops.push(
+        client[DELEGATE_BY_KEY[key]].deleteMany({
+          where: { [field]: { in: deleteIds } },
+        }),
+      );
     }
     for (const key of MODEL_ORDER) {
-      const data = payloads[key];
-      if (data.length > 0) {
-        await client[DELEGATE_BY_KEY[key]].createMany({ data });
+      const field = rowIdField(key);
+      for (const payload of diff[key].upserts) {
+        ops.push(
+          client[DELEGATE_BY_KEY[key]].upsert({
+            where: { [field]: payload[field] },
+            create: payload,
+            update: payload,
+          }),
+        );
       }
     }
+    if (ops.length > 0) {
+      await client.$transaction(ops);
+    }
+    this.snapshot = deepCopyStore(this.cache);
   }
 
   /** Close the underlying PrismaClient connection pool, if connected. */
@@ -221,6 +274,7 @@ export class PrismaDataAdapter implements DataAdapter {
       await this.client.$disconnect();
       this.client = null;
       this.hydratedOk = false;
+      this.snapshot = emptyStoreData();
     }
   }
 }

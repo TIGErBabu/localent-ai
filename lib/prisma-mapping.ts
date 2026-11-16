@@ -135,6 +135,7 @@ export interface PrismaClientLike {
   adminAuditLog: PrismaDelegate;
   $connect(): Promise<void>;
   $disconnect(): Promise<void>;
+  $transaction(ops: PromiseLike<unknown>[]): Promise<unknown[]>;
 }
 
 /** StoreData collection key → Prisma model delegate name. */
@@ -189,6 +190,98 @@ export const MODEL_ORDER: StoreKey[] = [
 
 /** Delete order: exact reverse of MODEL_ORDER so children go first. */
 export const DELETE_ORDER: StoreKey[] = [...MODEL_ORDER].reverse();
+
+/**
+ * Primary-key field for a collection, as named in the Prisma payloads:
+ * every model uses `id` except JobPrivateDetails, whose PK is `jobId`.
+ */
+export function rowIdField(key: StoreKey): string {
+  return key === "jobPrivateDetails" ? "jobId" : "id";
+}
+
+// ─── Snapshot diffing (the Prisma adapter's flush) ──────────────────────────
+// flush() must never write a row the flushing instance did not touch: with
+// many warm serverless instances each holding a hydrate-time snapshot of the
+// whole store, a full-rewrite flush lets a stale instance resurrect old row
+// versions and delete rows created after its snapshot (observed in
+// production: a login-triggered flush from a pre-acceptance instance
+// reverted an accepted bid/job and wiped the schedule + check-in evidence).
+// The diff is computed on Prisma payloads (post-conversion), so StoreData
+// fields that never reach the database (JobPost.completionCode) cannot
+// produce phantom changes, and Date/Decimal coercions compare equal.
+
+export interface TableDiff {
+  /** Create payloads for rows that are new or whose contents changed. */
+  upserts: Payload[];
+  /** Ids present in the snapshot but absent now — deleted by THIS instance. */
+  deleteIds: string[];
+}
+
+export type StoreDiff = Record<StoreKey, TableDiff>;
+
+/** Deep equality over payload values (primitives, Dates, arrays, objects). */
+function payloadValueEqual(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (a instanceof Date && b instanceof Date) {
+    return a.getTime() === b.getTime();
+  }
+  if (Array.isArray(a) && Array.isArray(b)) {
+    return (
+      a.length === b.length &&
+      a.every((v, i) => payloadValueEqual(v, b[i]))
+    );
+  }
+  if (
+    a !== null &&
+    b !== null &&
+    typeof a === "object" &&
+    typeof b === "object"
+  ) {
+    const aRec = a as Record<string, unknown>;
+    const bRec = b as Record<string, unknown>;
+    const aKeys = Object.keys(aRec);
+    if (aKeys.length !== Object.keys(bRec).length) return false;
+    return aKeys.every((k) => payloadValueEqual(aRec[k], bRec[k]));
+  }
+  return false;
+}
+
+/**
+ * Diff two StoreData snapshots row-by-row, per table, keyed on row id:
+ * a row is an upsert when it is absent from `snapshot` or its Prisma
+ * payload differs; it is a delete only when it is present in `snapshot`
+ * and absent from `current`. Rows the current instance never saw (created
+ * by another instance after this one hydrated) appear in neither side and
+ * are therefore never written or deleted. Pure — unit-tested directly.
+ */
+export function computeStoreDiff(
+  snapshot: StoreData,
+  current: StoreData,
+): StoreDiff {
+  const identity: IdMapper = (id) => id;
+  const before = storeToPrismaPayloads(snapshot, identity);
+  const after = storeToPrismaPayloads(current, identity);
+  const diff = {} as StoreDiff;
+  for (const key of MODEL_ORDER) {
+    const field = rowIdField(key);
+    const beforeById = new Map<string, Payload>();
+    for (const row of before[key]) beforeById.set(String(row[field]), row);
+    const afterIds = new Set<string>();
+    const upserts: Payload[] = [];
+    for (const row of after[key]) {
+      const id = String(row[field]);
+      afterIds.add(id);
+      const prev = beforeById.get(id);
+      if (!prev || !payloadValueEqual(prev, row)) upserts.push(row);
+    }
+    const deleteIds: string[] = [];
+    for (const id of beforeById.keys()) {
+      if (!afterIds.has(id)) deleteIds.push(id);
+    }
+    diff[key] = { upserts, deleteIds };
+  }
+  return diff;
+}
 
 /**
  * Construct the real PrismaClient from the static import above. Throws if
