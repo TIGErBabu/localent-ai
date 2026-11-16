@@ -19,7 +19,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         <Header />
         <main className="mx-auto w-full max-w-6xl px-4 py-6 md:py-10">{children}</main>
         <footer className="border-t border-slate-200 bg-white">
-          <div className="mx-auto grid max-w-6xl gap-6 px-4 py-10 text-sm text-slate-500 md:grid-cols-3">
+          <div className="mx-auto grid max-w-6xl gap-6 px-4 py-10 text-sm text-slate-500 md:grid-cols-4">
             <div>
               <p className="font-extrabold text-trust">Localent<span className="text-action-dark">.ai</span></p>
               <p className="mt-2">Local pros, protected payments. Your money is held in milestone escrow and only released when the work is confirmed done.</p>
@@ -30,6 +30,15 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
                 <li><a className="hover:text-trust" href="/directory">Find a pro</a></li>
                 <li><a className="hover:text-trust" href="/register/customer">Post a job</a></li>
                 <li><a className="hover:text-trust" href="/register/pro">Join as a pro</a></li>
+              </ul>
+            </div>
+            <div>
+              <p className="font-semibold text-slate-700">Legal</p>
+              <ul className="mt-2 space-y-1.5">
+                <li><a className="hover:text-trust" href="/terms">Terms of Service</a></li>
+                <li><a className="hover:text-trust" href="/privacy">Privacy Policy</a></li>
+                <li><a className="hover:text-trust" href="/cancellation-policy">Cancellation Policy</a></li>
+                <li><a className="hover:text-trust" href="/dispute-policy">Dispute Policy</a></li>
               </ul>
             </div>
             <div>
