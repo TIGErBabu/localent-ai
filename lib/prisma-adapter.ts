@@ -24,9 +24,11 @@
 // tracing ships the package in serverless bundles), findMany's all 19
 // models (in small batches, to stay within the pooler's connection
 // limit), converts them via rowsToStoreData(), and swaps the cache (which
-// starts as an empty StoreData skeleton). `ready` resolves when hydration
-// finishes — successfully or not; `hydratedOk` records which of the two
-// it was, and ensureReady() retries hydration on demand when it failed.
+// starts as an empty StoreData skeleton). hydrate() itself retries
+// transient pooler failures up to 3 attempts with backoff before giving
+// up. `ready` resolves when hydration finishes — successfully or not;
+// `hydratedOk` records which of the two it was, and ensureReady() retries
+// hydration on demand when it failed.
 //
 // KNOWN LIMITATIONS:
 //  • Mutations made through data() (push / in-place edits, exactly how the
@@ -99,6 +101,19 @@ export class PrismaDataAdapter implements DataAdapter {
     }
   }
 
+  /**
+   * Hydrate the cache from Postgres, retrying transient failures with
+   * backoff: up to 3 attempts total (immediate, +400ms, +1200ms). The
+   * free-tier transaction pooler refuses connections intermittently under
+   * serverless cold-start load (P1001 "can't reach database server",
+   * observed in production), and a single failed attempt otherwise leaves
+   * the instance serving the empty skeleton until some read-critical path
+   * calls ensureReady(). Retrying
+   * inside hydrate() itself means the boot attempt — and every
+   * ensureReady() retry — rides out a brief pooler blip on its own.
+   * Only the final failure is logged, so one blip doesn't spam the logs
+   * with three warnings.
+   */
   private async hydrate(): Promise<void> {
     if (!process.env.DATABASE_URL) {
       console.warn(
@@ -107,8 +122,30 @@ export class PrismaDataAdapter implements DataAdapter {
       );
       return;
     }
+    const BACKOFF_MS = [400, 1200];
+    let lastErr: unknown;
+    for (let attempt = 0; attempt <= BACKOFF_MS.length; attempt++) {
+      if (attempt > 0) {
+        await new Promise((resolve) => setTimeout(resolve, BACKOFF_MS[attempt - 1]));
+      }
+      const err = await this.hydrateOnce();
+      if (err === null) return;
+      lastErr = err;
+    }
+    console.warn(
+      "[localent] PrismaDataAdapter: hydrate failed — serving an empty store. " +
+        "Check DATABASE_URL and that `npx prisma generate` has run.",
+      lastErr,
+    );
+    this.client = null;
+    this.hydratedOk = false;
+  }
+
+  /** One hydration attempt. Resolves null on success, the error on failure. */
+  private async hydrateOnce(): Promise<unknown> {
+    let client: PrismaClientLike | null = null;
     try {
-      const client = await createPrismaClient();
+      client = await createPrismaClient();
       // Limited concurrency: firing all 19 findMany calls at once can
       // exhaust the Supabase pooler's small connection limit and time out
       // fetching a connection (observed in production logs), so hydrate in
@@ -120,7 +157,7 @@ export class PrismaDataAdapter implements DataAdapter {
           MODEL_ORDER.slice(i, i + BATCH_SIZE).map(
             async (key): Promise<[StoreKey, Record<string, unknown>[]]> => [
               key,
-              await client[DELEGATE_BY_KEY[key]].findMany(),
+              await client![DELEGATE_BY_KEY[key]].findMany(),
             ],
           ),
         );
@@ -129,14 +166,20 @@ export class PrismaDataAdapter implements DataAdapter {
       this.cache = rowsToStoreData(rows);
       this.client = client;
       this.hydratedOk = true;
+      return null;
     } catch (err) {
-      console.warn(
-        "[localent] PrismaDataAdapter: hydrate failed — serving an empty store. " +
-          "Check DATABASE_URL and that `npx prisma generate` has run.",
-        err,
-      );
+      // Disconnect the failed attempt's client so its pool doesn't linger
+      // and add pressure on the pooler before the next retry.
+      if (client) {
+        try {
+          await client.$disconnect();
+        } catch {
+          /* best effort — the connection may never have opened */
+        }
+      }
       this.client = null;
       this.hydratedOk = false;
+      return err;
     }
   }
 

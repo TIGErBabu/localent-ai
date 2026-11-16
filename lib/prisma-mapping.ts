@@ -199,13 +199,20 @@ export const DELETE_ORDER: StoreKey[] = [...MODEL_ORDER].reverse();
 // Supabase serves the app through its transaction pooler (PgBouncer, port
 // 6543 / *.pooler.supabase.com). Prisma needs `pgbouncer=true` on pooled
 // URLs to disable prepared statements, which transaction pooling cannot
-// support. The pooler's connection limit is also small (5), and Prisma's
+// support. The pooler's connection limit is also small, and Prisma's
 // default 10s pool_timeout proved too tight under serverless cold starts
 // (hydrate queries timed out fetching a connection in production), so
-// pooled URLs also get `pool_timeout=30`. Each parameter is appended only
-// when the configured DATABASE_URL points at the pooler and doesn't
-// already carry it; direct URLs (DIRECT_URL, local Postgres) are passed
-// through untouched.
+// pooled URLs also get `pool_timeout=30`. Finally, pooled URLs get
+// `connection_limit=1`: Prisma's documented setting for serverless +
+// PgBouncer transaction mode. Without it, every serverless instance opens
+// its own multi-connection Prisma pool (default limit 5) and the many
+// concurrent instances overwhelm the free-tier pooler, which then refuses
+// connections intermittently (P1001 "can't reach database server",
+// observed in production). With transaction pooling, one connection per
+// instance is enough — PgBouncer multiplexes it across transactions.
+// Each parameter is appended only when the configured DATABASE_URL points
+// at the pooler and doesn't already carry it; direct URLs (DIRECT_URL,
+// local Postgres) are passed through untouched.
 function datasourceUrl(): string | undefined {
   const url = process.env.DATABASE_URL;
   if (!url) return undefined;
@@ -214,6 +221,7 @@ function datasourceUrl(): string | undefined {
   const params: string[] = [];
   if (!/[?&]pgbouncer=true/.test(url)) params.push("pgbouncer=true");
   if (!/[?&]pool_timeout=/.test(url)) params.push("pool_timeout=30");
+  if (!/[?&]connection_limit=/.test(url)) params.push("connection_limit=1");
   if (params.length === 0) return url;
   return url + (url.includes("?") ? "&" : "?") + params.join("&");
 }

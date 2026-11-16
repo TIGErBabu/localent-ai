@@ -1,7 +1,7 @@
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import type { Role, User } from "./types";
-import { findUser } from "./store";
+import { adapter, findUser } from "./store";
 import { verifyAccessToken } from "./jwt";
 import { ACCESS_COOKIE } from "./cookies";
 
@@ -16,6 +16,15 @@ export async function getSessionUser(): Promise<User | null> {
   if (!raw) return null;
   const claims = await verifyAccessToken(raw);
   if (!claims) return null;
+  // The user lookup reads the adapter's cache. If this instance's boot-time
+  // hydrate failed (transient pooler refusal), the cache is the empty
+  // skeleton and findUser would miss — concluding "logged out" for a valid
+  // session and bouncing the user to /login (observed in production).
+  // ensureReady() retries hydration first; it is a no-op once hydrated and
+  // for the in-memory adapter, so this costs nothing on the happy path.
+  // Every session read in the app funnels through here (requireUser,
+  // requireRole, Header, API routes), so this one call covers all renders.
+  await adapter.ensureReady();
   return findUser(claims.sub) ?? null;
 }
 export async function requireUser(): Promise<User> {
