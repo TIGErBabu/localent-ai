@@ -36,6 +36,9 @@ const storageScheme = () => (config.demoMode ? "demo" : "pending");
 
 // ─── Auth (real: scrypt password check + JWT session, lib/auth.ts) ───────────
 export async function loginAction(fd: FormData) {
+  // Login reads the store directly — make sure a failed boot-time hydrate
+  // has been retried before trusting it (see PrismaDataAdapter.ensureReady).
+  await adapter.ensureReady();
   const user = findUserByEmail(s(fd, "email"));
   if (!user || !verifyPassword(s(fd, "password"), user.passwordHash)) redirect("/login?error=1");
   // One-click demo accounts exist only while DEMO_MODE is on.
@@ -60,6 +63,7 @@ export async function changePasswordAction(fd: FormData) {
   redirect(`${back}?pw=saved`);
 }
 export async function registerCustomerAction(fd: FormData) {
+  await adapter.ensureReady(); // duplicate-email check reads the store
   const email = s(fd, "email");
   if (findUserByEmail(email)) redirect("/register/customer?error=exists");
   if (s(fd, "password").length < 8) redirect("/register/customer?error=weak");
@@ -69,6 +73,7 @@ export async function registerCustomerAction(fd: FormData) {
   redirect("/dashboard/customer");
 }
 export async function registerProAction(fd: FormData) {
+  await adapter.ensureReady(); // duplicate-email check reads the store
   const email = s(fd, "email");
   if (findUserByEmail(email)) redirect("/register/pro?error=exists");
   if (s(fd, "password").length < 8) redirect("/register/pro?error=weak");

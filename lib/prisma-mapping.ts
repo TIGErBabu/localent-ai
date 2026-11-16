@@ -199,17 +199,23 @@ export const DELETE_ORDER: StoreKey[] = [...MODEL_ORDER].reverse();
 // Supabase serves the app through its transaction pooler (PgBouncer, port
 // 6543 / *.pooler.supabase.com). Prisma needs `pgbouncer=true` on pooled
 // URLs to disable prepared statements, which transaction pooling cannot
-// support. Append it when the configured DATABASE_URL points at the pooler
-// and doesn't already carry it; direct URLs (DIRECT_URL, local Postgres)
-// are passed through untouched.
+// support. The pooler's connection limit is also small (5), and Prisma's
+// default 10s pool_timeout proved too tight under serverless cold starts
+// (hydrate queries timed out fetching a connection in production), so
+// pooled URLs also get `pool_timeout=30`. Each parameter is appended only
+// when the configured DATABASE_URL points at the pooler and doesn't
+// already carry it; direct URLs (DIRECT_URL, local Postgres) are passed
+// through untouched.
 function datasourceUrl(): string | undefined {
   const url = process.env.DATABASE_URL;
   if (!url) return undefined;
   const isPooler = url.includes("pooler.supabase.com") || url.includes(":6543");
-  if (isPooler && !/[?&]pgbouncer=true/.test(url)) {
-    return url + (url.includes("?") ? "&" : "?") + "pgbouncer=true";
-  }
-  return url;
+  if (!isPooler) return url;
+  const params: string[] = [];
+  if (!/[?&]pgbouncer=true/.test(url)) params.push("pgbouncer=true");
+  if (!/[?&]pool_timeout=/.test(url)) params.push("pool_timeout=30");
+  if (params.length === 0) return url;
+  return url + (url.includes("?") ? "&" : "?") + params.join("&");
 }
 
 export async function createPrismaClient(): Promise<PrismaClientLike> {

@@ -22,9 +22,11 @@
 // off hydrate(): it constructs PrismaClient via createPrismaClient() (a
 // static @prisma/client import in lib/prisma-mapping.ts, so Next.js file
 // tracing ships the package in serverless bundles), findMany's all 19
-// models, converts them via rowsToStoreData(), and swaps the cache (which
+// models (in small batches, to stay within the pooler's connection
+// limit), converts them via rowsToStoreData(), and swaps the cache (which
 // starts as an empty StoreData skeleton). `ready` resolves when hydration
-// finishes — successfully or not.
+// finishes — successfully or not; `hydratedOk` records which of the two
+// it was, and ensureReady() retries hydration on demand when it failed.
 //
 // KNOWN LIMITATIONS:
 //  • Mutations made through data() (push / in-place edits, exactly how the
@@ -65,6 +67,12 @@ import {
 export class PrismaDataAdapter implements DataAdapter {
   private cache: StoreData = emptyStoreData();
   private client: PrismaClientLike | null = null;
+  // True only once a hydrate() has run to completion. Tracked separately
+  // from `client`: a client can exist while its first queries timed out
+  // (observed in production — pool timeout during the parallel hydrate),
+  // and keying recovery off client presence alone left such an instance
+  // serving the empty skeleton for its whole lifetime.
+  private hydratedOk = false;
 
   /** Resolves once the initial hydrate() attempt has finished. */
   readonly ready: Promise<void>;
@@ -78,6 +86,19 @@ export class PrismaDataAdapter implements DataAdapter {
     return this.cache;
   }
 
+  /**
+   * Retry hydration if it has never succeeded. Read-critical paths (login,
+   * registration) await this before trusting data(), so one bad boot-time
+   * hydrate — e.g. a transient pool timeout — no longer poisons the
+   * instance permanently.
+   */
+  async ensureReady(): Promise<void> {
+    await this.ready;
+    if (!this.hydratedOk) {
+      await this.hydrate();
+    }
+  }
+
   private async hydrate(): Promise<void> {
     if (!process.env.DATABASE_URL) {
       console.warn(
@@ -88,18 +109,26 @@ export class PrismaDataAdapter implements DataAdapter {
     }
     try {
       const client = await createPrismaClient();
-      const entries = await Promise.all(
-        MODEL_ORDER.map(
-          async (key): Promise<[StoreKey, Record<string, unknown>[]]> => [
-            key,
-            await client[DELEGATE_BY_KEY[key]].findMany(),
-          ],
-        ),
-      );
+      // Limited concurrency: firing all 19 findMany calls at once can
+      // exhaust the Supabase pooler's small connection limit and time out
+      // fetching a connection (observed in production logs), so hydrate in
+      // batches of 4.
       const rows: Record<string, unknown[]> = {};
-      for (const [key, modelRows] of entries) rows[key] = modelRows;
+      const BATCH_SIZE = 4;
+      for (let i = 0; i < MODEL_ORDER.length; i += BATCH_SIZE) {
+        const entries = await Promise.all(
+          MODEL_ORDER.slice(i, i + BATCH_SIZE).map(
+            async (key): Promise<[StoreKey, Record<string, unknown>[]]> => [
+              key,
+              await client[DELEGATE_BY_KEY[key]].findMany(),
+            ],
+          ),
+        );
+        for (const [key, modelRows] of entries) rows[key] = modelRows;
+      }
       this.cache = rowsToStoreData(rows);
       this.client = client;
+      this.hydratedOk = true;
     } catch (err) {
       console.warn(
         "[localent] PrismaDataAdapter: hydrate failed — serving an empty store. " +
@@ -107,6 +136,7 @@ export class PrismaDataAdapter implements DataAdapter {
         err,
       );
       this.client = null;
+      this.hydratedOk = false;
     }
   }
 
@@ -118,13 +148,11 @@ export class PrismaDataAdapter implements DataAdapter {
    * write is loud instead of silent.
    */
   async flush(): Promise<void> {
-    await this.ready;
-    if (!this.client) {
-      // Hydration failed at boot (e.g. the database was briefly unreachable).
-      // flush() is the recovery path: retry hydration once here rather than
-      // leaving data() permanently poisoned by the failed first attempt.
-      await this.hydrate();
-    }
+    // flush() is also a recovery path: ensureReady() retries hydration when
+    // it never succeeded (the old condition keyed off `client === null`,
+    // which missed the case where the client exists but its hydrate queries
+    // timed out).
+    await this.ensureReady();
     if (!this.client) {
       throw new Error(
         "PrismaDataAdapter.flush(): not connected (hydrate did not succeed) — cache was NOT persisted.",
@@ -149,6 +177,7 @@ export class PrismaDataAdapter implements DataAdapter {
     if (this.client) {
       await this.client.$disconnect();
       this.client = null;
+      this.hydratedOk = false;
     }
   }
 }

@@ -15,6 +15,12 @@ export interface DataAdapter {
   // writes the cache through to Postgres; the in-memory adapter has nothing
   // to persist, so its flush is a no-op.
   flush(): Promise<void>;
+  // Guarantee the cache actually reflects the backing store before a
+  // read-critical path trusts data(). The Prisma adapter retries hydration
+  // if the boot-time attempt failed (a failed hydrate otherwise leaves the
+  // instance serving an empty store for its whole lifetime); the in-memory
+  // adapter is seeded synchronously at construction, so this is a no-op.
+  ensureReady(): Promise<void>;
 }
 
 class InMemoryAdapter implements DataAdapter {
@@ -22,6 +28,7 @@ class InMemoryAdapter implements DataAdapter {
   constructor() { this.store = buildSeed(); }
   data(): StoreData { return this.store; }
   async flush(): Promise<void> { /* in-memory store: nothing to persist */ }
+  async ensureReady(): Promise<void> { /* seeded at construction: always ready */ }
 }
 
 // Adapter selection is env-driven: DATA_ADAPTER=memory (default) serves the
