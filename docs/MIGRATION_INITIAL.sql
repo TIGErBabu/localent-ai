@@ -1,3 +1,6 @@
+-- Enable extensions required by this schema
+CREATE EXTENSION IF NOT EXISTS citext;
+
 -- CreateSchema
 CREATE SCHEMA IF NOT EXISTS "public";
 
