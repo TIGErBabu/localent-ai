@@ -25,11 +25,23 @@ export interface ConnectAccountResult { mode: "demo" | "live"; accountId: string
 export async function createConnectAccount(user: { id: string; email: string; name: string }): Promise<ConnectAccountResult> {
   const stripe = getStripe();
   if (!stripe) return { mode: "demo", accountId: `acct_demo_${user.id.replace(/[^a-z0-9]/gi, "")}` };
-  const account = await stripe.accounts.create({
-    type: "express",
-    email: user.email,
-    capabilities: { card_payments: { requested: true }, transfers: { requested: true } },
-    business_type: "individual",
+  // Accounts v2 (POST /v2/core/accounts): Stripe rejects v1 account creation
+  // for new Connect platforms. This payload is Stripe's own v2 translation of
+  // the old v1 Express request — merchant configuration takes card payments,
+  // recipient configuration receives Separate Charges & Transfers payouts into
+  // the Stripe balance, and the platform (application) collects fees/losses,
+  // matching the v1 Express defaults this replaces.
+  const account = await stripe.v2.core.accounts.create({
+    contact_email: user.email,
+    identity: { country: "US" },
+    dashboard: "express",
+    defaults: {
+      responsibilities: { fees_collector: "application", losses_collector: "application" },
+    },
+    configuration: {
+      merchant: { capabilities: { card_payments: { requested: true } } },
+      recipient: { capabilities: { stripe_balance: { stripe_transfers: { requested: true } } } },
+    },
     metadata: { localentUserId: user.id },
   });
   return { mode: "live", accountId: account.id };
@@ -38,8 +50,16 @@ export async function createConnectAccount(user: { id: string; email: string; na
 export async function createConnectAccountLink(accountId: string, refreshUrl: string, returnUrl: string): Promise<{ mode: "demo" | "live"; url: string }> {
   const stripe = getStripe();
   if (!stripe) return { mode: "demo", url: returnUrl };
-  const link = await stripe.accountLinks.create({
-    account: accountId, refresh_url: refreshUrl, return_url: returnUrl, type: "account_onboarding",
+  // Accounts v2 account links (POST /v2/core/account_links): the onboarding
+  // flow collects requirements for the configurations already on the account
+  // (merchant + recipient, set at creation above). SDK 23.1.0's
+  // AccountLinkCreateParams carries no per-link configurations field.
+  const link = await stripe.v2.core.accountLinks.create({
+    account: accountId,
+    use_case: {
+      type: "account_onboarding",
+      account_onboarding: { refresh_url: refreshUrl, return_url: returnUrl },
+    },
   });
   return { mode: "live", url: link.url };
 }
