@@ -458,7 +458,9 @@ export async function submitVerificationAction(fd: FormData) {
   p.licenceNumber = s(fd, "licenceNumber"); p.licenceTrade = s(fd, "licenceTrade"); p.licenceState = s(fd, "licenceState") || "FL";
   const bg = await runBackgroundCheck(user.id, { name: user.name, email: user.email });
   p.backgroundCheckStatus = bg.status;
-  notify("u-admin", "SYSTEM", `${p.businessName} submitted verification documents (${p.licenceTrade} licence ${p.licenceNumber}).`, null);
+  for (const admin of db().users.filter((u) => u.role === "ADMIN")) {
+    notify(admin.id, "SYSTEM", `${p.businessName} submitted verification documents (${p.licenceTrade} licence ${p.licenceNumber}).`, null);
+  }
   await persist();
   redirect("/dashboard/pro/profile?verification=submitted");
 }
