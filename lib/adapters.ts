@@ -149,9 +149,18 @@ export async function sendSms(phone: string, text: string): Promise<{ mode: "dem
     return { mode: "demo", delivered: false }; // notification row is still created in-app
   }
   // Blueprint 4.3: SMS bodies must never contain the other party's phone number.
-  const client = twilio(sid, token);
-  const msg = await client.messages.create({ to: phone, from, body: text });
-  return { mode: "live", delivered: msg.status !== "failed" && msg.status !== "undelivered" };
+  // An SMS failure (trial-account restrictions, a bad token/from-number, an
+  // unreachable recipient) must NEVER break the caller's flow — job posting
+  // notifies matched pros by SMS, and a Twilio error there must not 500 the
+  // customer's post. Log it and report not-delivered instead of throwing.
+  try {
+    const client = twilio(sid, token);
+    const msg = await client.messages.create({ to: phone, from, body: text });
+    return { mode: "live", delivered: msg.status !== "failed" && msg.status !== "undelivered" };
+  } catch (e) {
+    console.error("[localent] sendSms failed", e);
+    return { mode: "live", delivered: false };
+  }
 }
 
 // ─── Checkr background checks ────────────────────────────────────────────────
